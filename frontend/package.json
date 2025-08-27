@@ -1,0 +1,22 @@
+{
+  "name": "semantic-kernel-frontend",
+  "version": "1.0.0",
+  "description": "Frontend for Semantic Kernel API",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "14.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "eslint-config-next": "14.0.0"
+  }
+}

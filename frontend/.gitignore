@@ -1,0 +1,22 @@
+# Python environment
+sk_env_26aug/
+env/
+venv/
+
+# Environment files
+*.env
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Node/React
+node_modules/
+build/
+dist/

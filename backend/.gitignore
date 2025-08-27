@@ -1,0 +1,12 @@
+.env
+*.env
+env/
+venv/
+sk_env_26aug/
+__pycache__/
+*.pyc
+*.sqlite
+*.db
+*.log
+*.zip
+*.tar
