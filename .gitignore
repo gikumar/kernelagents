@@ -1,0 +1,69 @@
+# =====================
+# Python / Backend
+# =====================
+
+# Virtual environments
+sk_env_26aug/
+env/
+venv/
+
+# Environment files
+.env
+*.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Byte-compiled / distribution
+*.egg
+*.egg-info/
+dist/
+build/
+
+# =====================
+# Node / Frontend
+# =====================
+
+# Node modules
+node_modules/
+
+# Production build
+build/
+dist/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Optional npm cache folder
+.npm/
+
+# Optional eslint cache
+.eslintcache
+
+# =====================
+# IDE / Editor
+# =====================
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# =====================
+# Misc
+# =====================
+
+# Temporary files
+*.swp
+*.tmp
+*.bak
+*.old
