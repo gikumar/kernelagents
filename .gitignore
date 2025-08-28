@@ -3,50 +3,57 @@
 # =====================
 
 # Virtual environments
-sk_env_26aug/
-env/
-venv/
+backend/sk_env_26aug/
+backend/env/
+backend/venv/
+backend/.venv/
 
 # Environment files
-.env
-*.env
+backend/.env
+backend/*.env
 
 # Python cache
-__pycache__/
-*.pyc
+backend/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/*.pyd
 
 # Logs and databases
-*.log
-*.sqlite
-*.db
+backend/*.log
+backend/*.sqlite
+backend/*.db
 
 # Byte-compiled / distribution
-*.egg
-*.egg-info/
-dist/
-build/
+backend/*.egg
+backend/*.egg-info/
+backend/dist/
+backend/build/
 
 # =====================
 # Node / Frontend
 # =====================
 
 # Node modules
-node_modules/
+frontend/node_modules/
+
+# Next.js build and cache
+frontend/.next/
+frontend/out/
 
 # Production build
-build/
-dist/
+frontend/build/
+frontend/dist/
 
 # Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
 
 # Optional npm cache folder
-.npm/
+frontend/.npm/
 
 # Optional eslint cache
-.eslintcache
+frontend/.eslintcache
 
 # =====================
 # IDE / Editor
@@ -54,9 +61,13 @@ yarn-error.log*
 
 # VS Code
 .vscode/
+backend/.vscode/
+frontend/.vscode/
 
 # macOS
 .DS_Store
+backend/.DS_Store
+frontend/.DS_Store
 
 # =====================
 # Misc
@@ -67,3 +78,49 @@ yarn-error.log*
 *.tmp
 *.bak
 *.old
+backend/*.swp
+backend/*.tmp
+backend/*.bak
+backend/*.old
+frontend/*.swp
+frontend/*.tmp
+frontend/*.bak
+frontend/*.old
+
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+frontend/node_modules
+frontend/.pnp
+frontend/.pnp.js
+
+# testing
+frontend/coverage
+
+# next.js
+frontend/.next/
+frontend/out/
+
+# production
+frontend/build
+
+# misc
+.DS_Store
+*.pem
+frontend/.DS_Store
+frontend/*.pem
+
+# debug
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+
+# local env files
+frontend/.env*.local
+
+# vercel
+frontend/.vercel
+
+# typescript
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
