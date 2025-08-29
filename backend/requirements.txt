@@ -1,11 +1,13 @@
 # requirements.txt
-semantic-kernel==1.35.3
-# pip install "semantic-kernel[azure]"
-azure-ai-agents==1.2.0b3
-azure-identity==1.24.0
-fastapi==0.116.1
+
+# Use the latest available versions
+semantic-kernel==1.35.0
+azure-ai-agents==1.1.0  
+azure-identity==1.13.0
+azure-ai-projects==1.1.0b1  # Use beta version
+
+# fastapi
+fastapi==0.104.1
 uvicorn==0.35.0
 python-dotenv==1.1.1
 pydantic==2.11.7
-
-#pip show
