@@ -124,3 +124,8 @@ frontend/.vercel
 # typescript
 frontend/*.tsbuildinfo
 frontend/next-env.d.ts
+backend/helper/check_function_calling.py
+backend/helper/check_imports.py
+backend/helper/check_microsoft_imports.py
+backend/helper/check_planner.py
+backend/helper/group_chat.py

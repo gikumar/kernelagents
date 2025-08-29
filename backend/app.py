@@ -1,4 +1,4 @@
-# app.py - Enhanced with multi-agent management
+# app.py - Fixed version with proper function invocation
 import os
 import asyncio
 from dotenv import load_dotenv
@@ -7,30 +7,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from semantic_kernel import Kernel
 from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
-from semantic_kernel.agents import AzureAIAgent
-from azure.ai.projects.aio import AIProjectClient
-from azure.identity import DefaultAzureCredential
-from typing import Dict, Optional
+from semantic_kernel.functions import kernel_function
+from typing import Dict, Optional, List
 
 # Load environment variables
 load_dotenv()
 
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-AZURE_AI_PROJECT_ENDPOINT = os.getenv("AZURE_AI_PROJECT_ENDPOINT")
-AZURE_AI_AGENT_ID = os.getenv("AZURE_AI_AGENT_ID", None)
+ENDPOINTS_KEY = os.getenv("ENDPOINTS_KEY")
+DEPLOYMENT_NAME = os.getenv("DEPLOYMENT_NAME")
 
-if not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_KEY or not AZURE_OPENAI_DEPLOYMENT:
+if not AZURE_OPENAI_ENDPOINT or not ENDPOINTS_KEY or not DEPLOYMENT_NAME:
     raise ValueError("Please update Azure OpenAI credentials in your .env file.")
-
-if not AZURE_AI_PROJECT_ENDPOINT:
-    raise ValueError("Please set AZURE_AI_PROJECT_ENDPOINT in your .env file.")
 
 # Initialize FastAPI with CORS support
 app = FastAPI(title="Semantic Kernel API")
 
-# Add CORS middleware to allow requests from frontend
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -46,240 +39,212 @@ kernel = Kernel()
 service_id = "azure_chat_completion"
 azure_chat_service = AzureChatCompletion(
     service_id=service_id,
-    deployment_name=AZURE_OPENAI_DEPLOYMENT,
+    deployment_name=DEPLOYMENT_NAME,
     endpoint=AZURE_OPENAI_ENDPOINT,
-    api_key=AZURE_OPENAI_KEY,
+    api_key=ENDPOINTS_KEY,
 )
 kernel.add_service(azure_chat_service)
-
-# Create Azure AI Project client
-credential = DefaultAzureCredential()
-client = AIProjectClient(
-    credential=credential,
-    endpoint=AZURE_AI_PROJECT_ENDPOINT,
-)
-
-# Agent registry to manage multiple agents
-agent_registry: Dict[str, AzureAIAgent] = {}
-agent_definitions_cache: Dict[str, dict] = {}
 
 # Pydantic models
 class UserPrompt(BaseModel):
     prompt: str
-    agent_name: Optional[str] = "default"
 
-class AgentConfig(BaseModel):
-    name: str
-    description: str
-    instructions: str
-    model: str = AZURE_OPENAI_DEPLOYMENT
+class FunctionCallRequest(BaseModel):
+    prompt: str
+    max_tokens: Optional[int] = 2000
 
-async def find_agent_by_name(agent_name: str):
-    """Find an existing agent by name"""
-    try:
-        async for agent in client.agents.list_agents():
-            if agent.name.lower() == agent_name.lower():
-                return agent
-        return None
-    except Exception as e:
-        print(f"Error searching for agent: {str(e)}")
-        return None
-
-async def get_or_create_agent(agent_config: dict):
-    """Get existing agent or create a new one if it doesn't exist"""
-    agent_name = agent_config["name"]
+# Create a chat function
+def create_chat_function():
+    """Create a chat function for the kernel"""
+    from semantic_kernel.prompt_template import PromptTemplateConfig
     
-    # Check if we already have this agent in memory
-    if agent_name in agent_registry:
-        print(f"Using cached agent: {agent_name}")
-        return agent_registry[agent_name]
-    
-    # Check if agent exists in Azure AI
-    existing_agent = await find_agent_by_name(agent_name)
-    
-    if existing_agent:
-        print(f"Found existing agent: {agent_name} (ID: {existing_agent.id})")
-        # Initialize AzureAIAgent with the existing agent
-        agent = AzureAIAgent(
-            definition=existing_agent,
-            kernel=kernel,
-            client=client
-        )
-        agent_registry[agent_name] = agent
-        agent_definitions_cache[agent_name] = agent_config
-        return agent
-    else:
-        # Create new agent
-        print(f"Creating new agent: {agent_name}")
-        created_agent = await client.agents.create_agent(body=agent_config)
-        print(f"Agent created with ID: {created_agent.id}")
+    prompt_template = """
+    You are a helpful AI assistant. Please respond to the user's query in a helpful and friendly manner.
 
-        # Initialize AzureAIAgent
-        agent = AzureAIAgent(
-            definition=created_agent,
-            kernel=kernel,
-            client=client
-        )
-        agent_registry[agent_name] = agent
-        agent_definitions_cache[agent_name] = agent_config
-        return agent
+    User: {{$input}}
+    Assistant:
+    """
+    
+    return kernel.add_function(
+        function_name="chat",
+        plugin_name="assistant",
+        prompt=prompt_template,
+        description="Chat with the AI assistant"
+    )
 
-# Pre-defined agent configurations
-DEFAULT_AGENTS = {
-    "default": {
-        "name": "HelpfulAssistant",
-        "description": "A helpful AI assistant",
-        "instructions": "You are a helpful AI assistant. Provide clear and concise responses to user queries.",
-        "model": AZURE_OPENAI_DEPLOYMENT,
-    },
-    "creative": {
-        "name": "CreativeWriter",
-        "description": "A creative writing assistant",
-        "instructions": "You are a creative writing assistant. Help users with storytelling, poetry, and creative content generation. Be imaginative and engaging.",
-        "model": AZURE_OPENAI_DEPLOYMENT,
-    },
-    "technical": {
-        "name": "TechnicalExpert",
-        "description": "A technical expert assistant",
-        "instructions": "You are a technical expert. Provide detailed, accurate technical information about programming, cloud services, and software development. Be precise and include code examples when appropriate.",
-        "model": AZURE_OPENAI_DEPLOYMENT,
-    },
-    "analytical": {
-        "name": "DataAnalyst",
-        "description": "A data analysis assistant",
-        "instructions": "You are a data analyst. Help users with data interpretation, statistics, and analytical reasoning. Be logical and methodical in your approach.",
-        "model": AZURE_OPENAI_DEPLOYMENT,
-    }
-}
+# Function Calling Manager
+class FunctionCallingManager:
+    """Function calling manager"""
+    
+    def __init__(self, kernel: Kernel):
+        self.kernel = kernel
+        self.functions_registered = False
+        print("✅ Function Calling Manager initialized")
+    
+    def register_functions(self):
+        """Register functions with the kernel"""
+        from semantic_kernel.functions import kernel_function
+        
+        @kernel_function(name="get_weather", description="Get weather for a location")
+        def get_weather(location: str) -> str:
+            weather_data = {
+                "new york": "Sunny, 25°C, Light breeze",
+                "london": "Cloudy, 18°C, Light rain",
+                "tokyo": "Clear, 28°C, Humid", 
+                "san francisco": "Foggy, 20°C, Moderate wind",
+                "paris": "Partly cloudy, 22°C, Gentle breeze",
+                "dubai": "Hot and sunny, 38°C, Dry"
+            }
+            return f"Weather in {location}: {weather_data.get(location.lower(), 'Sunny, 24°C')}"
+        
+        @kernel_function(name="get_stock_price", description="Get current stock price")
+        def get_stock_price(symbol: str) -> str:
+            stock_data = {
+                "AAPL": "$185.32 ↗️ (+1.5%)",
+                "MSFT": "$412.56 ↗️ (+2.3%)", 
+                "GOOGL": "$172.45 ↘️ (-0.8%)",
+                "TSLA": "$245.78 ↗️ (+3.2%)",
+                "AMZN": "$178.90 ↗️ (+1.2%)",
+                "NVDA": "$950.60 ↗️ (+4.1%)"
+            }
+            return f"Stock {symbol}: {stock_data.get(symbol.upper(), '$150.00 → (0.0%)')}"
+        
+        @kernel_function(name="analyze_sentiment", description="Analyze text sentiment")
+        def analyze_sentiment(text: str) -> str:
+            positive_words = ["love", "great", "excellent", "amazing", "happy", "good", "wonderful", "fantastic", "perfect"]
+            negative_words = ["hate", "terrible", "awful", "bad", "sad", "angry", "disappointing", "poor", "horrible"]
+            
+            text_lower = text.lower()
+            positive_count = sum(1 for word in positive_words if word in text_lower)
+            negative_count = sum(1 for word in negative_words if word in text_lower)
+            
+            if positive_count > negative_count:
+                return "Sentiment: Positive 😊 (Score: 0.85)"
+            elif negative_count > positive_count:
+                return "Sentiment: Negative 😞 (Score: 0.25)" 
+            else:
+                return "Sentiment: Neutral 😐 (Score: 0.50)"
+        
+        # Add functions to kernel
+        self.kernel.add_function(plugin_name="weather_service", function_name="get_weather", function=get_weather)
+        self.kernel.add_function(plugin_name="finance_service", function_name="get_stock_price", function=get_stock_price)
+        self.kernel.add_function(plugin_name="text_analysis", function_name="analyze_sentiment", function=analyze_sentiment)
+        
+        self.functions_registered = True
+        print("✅ Functions registered")
+    
+    async def execute_with_function_calling(self, prompt: str, max_tokens: int = 2000):
+        """Execute with function calling"""
+        if not self.functions_registered:
+            self.register_functions()
+        
+        try:
+            # Create a more specific prompt that encourages function calling
+            enhanced_prompt = f"""
+            Please use the available functions to answer this query. 
+            The functions provide simulated data for demonstration purposes.
+            
+            Query: {prompt}
+            
+            Please call the appropriate functions to get the information.
+            """
+            
+            # For function calling, we'll use the Azure service directly
+            from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+                AzureChatPromptExecutionSettings,
+            )
+            
+            execution_settings = AzureChatPromptExecutionSettings(
+                service_id="azure_chat_completion",
+                temperature=0.1,
+                max_tokens=max_tokens,
+                tool_choice="auto",
+            )
+            
+            # Create a temporary function for this invocation
+            function = self.kernel.add_function(
+                plugin_name="temp_assistant",
+                function_name="assist_with_functions",
+                prompt=enhanced_prompt,
+                description="Assistant that uses available functions"
+            )
+            
+            result = await self.kernel.invoke(
+                function=function,
+                execution_settings=execution_settings
+            )
+            
+            return str(result)
+            
+        except Exception as e:
+            return f"Error in function calling: {str(e)}"
+
+# Create chat function
+chat_function = create_chat_function()
+
+# Initialize function calling manager
+function_calling_manager = FunctionCallingManager(kernel)
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize agents on startup"""
-    print("Initializing agents...")
-    
-    # Initialize default agent
-    try:
-        default_agent = await get_or_create_agent(DEFAULT_AGENTS["default"])
-        print(f"Default agent initialized: {DEFAULT_AGENTS['default']['name']}")
-    except Exception as e:
-        print(f"Error initializing default agent: {str(e)}")
-        print("Application will continue but agent functionality may be limited")
+    """Initialize on startup"""
+    print("✅ Application started successfully")
+    print(f"Using model: {DEPLOYMENT_NAME}")
 
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    agents_info = []
-    for name, agent in agent_registry.items():
-        agents_info.append({
-            "name": name,
-            "initialized": agent is not None,
-            "definition": agent_definitions_cache.get(name, {})
-        })
-    
     return {
         "status": "healthy", 
-        "initialized_agents": agents_info,
-        "available_agent_types": list(DEFAULT_AGENTS.keys())
+        "model": DEPLOYMENT_NAME,
+        "function_calling_available": True,
+        "service": "Azure OpenAI"
     }
 
-# Get available agents
-@app.get("/agents")
-async def list_agents():
-    """List all available agents"""
-    return {
-        "predefined_agents": list(DEFAULT_AGENTS.keys()),
-        "initialized_agents": list(agent_registry.keys()),
-        "agent_definitions": agent_definitions_cache
-    }
-
-# POST endpoint with agent selection
-@app.post("/ask")
-async def ask(user_prompt: UserPrompt):
+# Basic chat endpoint - FIXED
+@app.post("/chat")
+async def chat(user_prompt: UserPrompt):
     try:
-        agent_name = user_prompt.agent_name or "default"
-        
-        # Get or create the requested agent
-        if agent_name in DEFAULT_AGENTS:
-            agent_config = DEFAULT_AGENTS[agent_name]
-            agent = await get_or_create_agent(agent_config)
-        else:
-            # Use default agent if requested agent doesn't exist
-            print(f"Agent '{agent_name}' not found. Using default agent.")
-            agent_config = DEFAULT_AGENTS["default"]
-            agent = await get_or_create_agent(agent_config)
-        
-        if agent is None:
-            return {"error": f"Agent '{agent_name}' not initialized. Check startup logs."}
-        
-        print(f"Processing prompt with agent '{agent_name}': {user_prompt.prompt}")
-        
-        # Process the prompt
-        response_messages = []
-        async for response_chunk in agent.invoke(user_prompt.prompt):
-            response_messages.append(str(response_chunk))
-        
-        full_response = " ".join(response_messages)
-        return {
-            "response": full_response,
-            "agent_used": agent_name,
-            "agent_description": agent_config["description"]
-        }
-        
-    except Exception as e:
-        print(f"Error in ask endpoint: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e), "type": type(e).__name__}
-
-# Create custom agent endpoint
-@app.post("/agents/create")
-async def create_custom_agent(agent_config: AgentConfig):
-    """Create a custom agent with specific configuration"""
-    try:
-        # Check if agent already exists
-        existing_agent = await find_agent_by_name(agent_config.name)
-        if existing_agent:
-            return {
-                "message": f"Agent '{agent_config.name}' already exists",
-                "agent_id": existing_agent.id,
-                "status": "existing"
-            }
-        
-        # Create new agent
-        config_dict = agent_config.dict()
-        agent = await get_or_create_agent(config_dict)
-        
-        return {
-            "message": f"Agent '{agent_config.name}' created successfully",
-            "agent_name": agent_config.name,
-            "status": "created"
-        }
-        
-    except Exception as e:
-        return {"error": str(e), "type": type(e).__name__}
-
-# Alternative: Direct kernel invocation (fallback)
-@app.post("/ask-direct")
-async def ask_direct(user_prompt: UserPrompt):
-    try:
-        prompt_template = """
-        You are a helpful AI assistant. Please respond to the user's query.
-
-        User: {{$input}}
-        Assistant:
-        """
-        
-        function = kernel.add_function(
-            plugin_name="AssistantPlugin",
-            function_name="Respond",
-            prompt=prompt_template,
+        # Use the pre-created chat function
+        result = await kernel.invoke(
+            function=chat_function,
+            input=user_prompt.prompt
         )
-        
-        result = await kernel.invoke(function, input=user_prompt.prompt)
         return {"response": str(result)}
-        
     except Exception as e:
         return {"error": str(e)}
+
+# Function calling endpoint
+@app.post("/function-calling/execute")
+async def execute_function_calling(request: FunctionCallRequest):
+    try:
+        result = await function_calling_manager.execute_with_function_calling(
+            request.prompt,
+            request.max_tokens
+        )
+        return {"result": result}
+    except Exception as e:
+        return {"error": str(e)}
+
+# Function calling demo
+@app.post("/function-calling/demo")
+async def function_calling_demo():
+    demo_prompt = "What's the weather in Tokyo and New York? Also show me AAPL stock price and analyze sentiment of 'I love this product!'"
+    try:
+        result = await function_calling_manager.execute_with_function_calling(demo_prompt)
+        return {"result": result}
+    except Exception as e:
+        return {"error": str(e)}
+
+# Get capabilities
+@app.get("/function-calling/capabilities")
+async def get_function_capabilities():
+    return {
+        "current_deployment": DEPLOYMENT_NAME,
+        "available_functions": ["get_weather", "get_stock_price", "analyze_sentiment"],
+        "supported": True,
+        "model_type": "GPT-4o"
+    }
 
 # Root endpoint
 @app.get("/")
@@ -288,12 +253,12 @@ async def root():
         "message": "Semantic Kernel API running",
         "endpoints": {
             "health_check": "/health",
-            "list_agents": "/agents (GET)",
-            "ask_agent": "/ask (POST)",
-            "create_agent": "/agents/create (POST)",
-            "ask_direct": "/ask-direct (POST)"
+            "chat": "/chat (POST)",
+            "function_calling_execute": "/function-calling/execute (POST)",
+            "function_calling_demo": "/function-calling/demo (POST)",
+            "function_capabilities": "/function-calling/capabilities (GET)"
         },
-        "available_agents": list(DEFAULT_AGENTS.keys())
+        "model": DEPLOYMENT_NAME
     }
 
 if __name__ == "__main__":
