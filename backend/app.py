@@ -1,266 +1,203 @@
-# app.py - Fixed version with proper function invocation
-import os
-import asyncio
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+# backend/app/main.py
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from semantic_kernel import Kernel
-from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
-from semantic_kernel.functions import kernel_function
-from typing import Dict, Optional, List
+from typing import List, Optional, Dict, Any
+from fastapi.middleware.cors import CORSMiddleware
+import os
+import sys
+from contextlib import asynccontextmanager
+import logging
+from .agentfactory import AgentFactory
+from .utility.thread_cleanup_scheduler import start_thread_cleanup_scheduler
 
-# Load environment variables
-load_dotenv()
+# Set up logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-ENDPOINTS_KEY = os.getenv("ENDPOINTS_KEY")
-DEPLOYMENT_NAME = os.getenv("DEPLOYMENT_NAME")
+# Create console handler with higher level
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
 
-if not AZURE_OPENAI_ENDPOINT or not ENDPOINTS_KEY or not DEPLOYMENT_NAME:
-    raise ValueError("Please update Azure OpenAI credentials in your .env file.")
+# Create formatter and add it to the handlers
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+ch.setFormatter(formatter)
+logger.addHandler(ch)
 
-# Initialize FastAPI with CORS support
-app = FastAPI(title="Semantic Kernel API")
+sys.path.append(os.path.dirname(__file__))
+agent_factory = AgentFactory()
 
-# Add CORS middleware
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀Starting application lifespan")
+    
+    # Ensure cache directory exists
+    from pathlib import Path
+    cache_dir = Path(__file__).parent / "cache"
+    cache_dir.mkdir(exist_ok=True)
+    
+    # Load schema at startup
+    try:
+        from .schema_utils import load_schema, refresh_schema
+        schema_data = load_schema()
+        
+        if not schema_data:
+            logger.warning("❌ No schema found in cache, refreshing from Databricks...")
+            schema_data = refresh_schema()
+        
+        logger.info(f"✅ Schema loaded with {len(schema_data)} tables")
+    except Exception as e:
+        logger.error(f"❌ Failed to load schema: {str(e)}")
+    
+    # Initialize function calling manager
+    from .app.function_calling_manager import FunctionCallingManager
+    from semantic_kernel import Kernel
+    
+    kernel = Kernel()
+    global function_calling_manager
+    function_calling_manager = FunctionCallingManager(kernel)
+    function_calling_manager.register_functions()
+    
+    start_thread_cleanup_scheduler()
+    yield
+    logger.info("🚀Application shutdown")
+
+# Create the FastAPI app with lifespan
+app = FastAPI(lifespan=lifespan, title="Semantic Kernel API")
+
+origins = [
+    "http://localhost",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize Kernel
-kernel = Kernel()
+class Message(BaseModel):
+    role: str
+    content: str
+    isError: Optional[bool] = False
 
-# Add Azure Chat Service
-service_id = "azure_chat_completion"
-azure_chat_service = AzureChatCompletion(
-    service_id=service_id,
-    deployment_name=DEPLOYMENT_NAME,
-    endpoint=AZURE_OPENAI_ENDPOINT,
-    api_key=ENDPOINTS_KEY,
-)
-kernel.add_service(azure_chat_service)
-
-# Pydantic models
-class UserPrompt(BaseModel):
+class AskRequest(BaseModel):
+    agentMode: str
     prompt: str
+    file_content: Optional[str] = None
+    chat_history: Optional[List[Message]] = None
 
-class FunctionCallRequest(BaseModel):
-    prompt: str
-    max_tokens: Optional[int] = 2000
+class AskResponse(BaseModel):
+    response: str
+    thread_id: Optional[str]
+    input_tokens: Optional[int]
+    output_tokens: Optional[int]
+    graph_data: Optional[Dict[str, Any]] = None
+    status: str
 
-# Create a chat function
-def create_chat_function():
-    """Create a chat function for the kernel"""
-    from semantic_kernel.prompt_template import PromptTemplateConfig
-    
-    prompt_template = """
-    You are a helpful AI assistant. Please respond to the user's query in a helpful and friendly manner.
-
-    User: {{$input}}
-    Assistant:
-    """
-    
-    return kernel.add_function(
-        function_name="chat",
-        plugin_name="assistant",
-        prompt=prompt_template,
-        description="Chat with the AI assistant"
-    )
-
-# Function Calling Manager
-class FunctionCallingManager:
-    """Function calling manager"""
-    
-    def __init__(self, kernel: Kernel):
-        self.kernel = kernel
-        self.functions_registered = False
-        print("✅ Function Calling Manager initialized")
-    
-    def register_functions(self):
-        """Register functions with the kernel"""
-        from semantic_kernel.functions import kernel_function
-        
-        @kernel_function(name="get_weather", description="Get weather for a location")
-        def get_weather(location: str) -> str:
-            weather_data = {
-                "new york": "Sunny, 25°C, Light breeze",
-                "london": "Cloudy, 18°C, Light rain",
-                "tokyo": "Clear, 28°C, Humid", 
-                "san francisco": "Foggy, 20°C, Moderate wind",
-                "paris": "Partly cloudy, 22°C, Gentle breeze",
-                "dubai": "Hot and sunny, 38°C, Dry"
-            }
-            return f"Weather in {location}: {weather_data.get(location.lower(), 'Sunny, 24°C')}"
-        
-        @kernel_function(name="get_stock_price", description="Get current stock price")
-        def get_stock_price(symbol: str) -> str:
-            stock_data = {
-                "AAPL": "$185.32 ↗️ (+1.5%)",
-                "MSFT": "$412.56 ↗️ (+2.3%)", 
-                "GOOGL": "$172.45 ↘️ (-0.8%)",
-                "TSLA": "$245.78 ↗️ (+3.2%)",
-                "AMZN": "$178.90 ↗️ (+1.2%)",
-                "NVDA": "$950.60 ↗️ (+4.1%)"
-            }
-            return f"Stock {symbol}: {stock_data.get(symbol.upper(), '$150.00 → (0.0%)')}"
-        
-        @kernel_function(name="analyze_sentiment", description="Analyze text sentiment")
-        def analyze_sentiment(text: str) -> str:
-            positive_words = ["love", "great", "excellent", "amazing", "happy", "good", "wonderful", "fantastic", "perfect"]
-            negative_words = ["hate", "terrible", "awful", "bad", "sad", "angry", "disappointing", "poor", "horrible"]
-            
-            text_lower = text.lower()
-            positive_count = sum(1 for word in positive_words if word in text_lower)
-            negative_count = sum(1 for word in negative_words if word in text_lower)
-            
-            if positive_count > negative_count:
-                return "Sentiment: Positive 😊 (Score: 0.85)"
-            elif negative_count > positive_count:
-                return "Sentiment: Negative 😞 (Score: 0.25)" 
-            else:
-                return "Sentiment: Neutral 😐 (Score: 0.50)"
-        
-        # Add functions to kernel
-        self.kernel.add_function(plugin_name="weather_service", function_name="get_weather", function=get_weather)
-        self.kernel.add_function(plugin_name="finance_service", function_name="get_stock_price", function=get_stock_price)
-        self.kernel.add_function(plugin_name="text_analysis", function_name="analyze_sentiment", function=analyze_sentiment)
-        
-        self.functions_registered = True
-        print("✅ Functions registered")
-    
-    async def execute_with_function_calling(self, prompt: str, max_tokens: int = 2000):
-        """Execute with function calling"""
-        if not self.functions_registered:
-            self.register_functions()
-        
-        try:
-            # Create a more specific prompt that encourages function calling
-            enhanced_prompt = f"""
-            Please use the available functions to answer this query. 
-            The functions provide simulated data for demonstration purposes.
-            
-            Query: {prompt}
-            
-            Please call the appropriate functions to get the information.
-            """
-            
-            # For function calling, we'll use the Azure service directly
-            from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
-                AzureChatPromptExecutionSettings,
-            )
-            
-            execution_settings = AzureChatPromptExecutionSettings(
-                service_id="azure_chat_completion",
-                temperature=0.1,
-                max_tokens=max_tokens,
-                tool_choice="auto",
-            )
-            
-            # Create a temporary function for this invocation
-            function = self.kernel.add_function(
-                plugin_name="temp_assistant",
-                function_name="assist_with_functions",
-                prompt=enhanced_prompt,
-                description="Assistant that uses available functions"
-            )
-            
-            result = await self.kernel.invoke(
-                function=function,
-                execution_settings=execution_settings
-            )
-            
-            return str(result)
-            
-        except Exception as e:
-            return f"Error in function calling: {str(e)}"
-
-# Create chat function
-chat_function = create_chat_function()
-
-# Initialize function calling manager
-function_calling_manager = FunctionCallingManager(kernel)
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize on startup"""
-    print("✅ Application started successfully")
-    print(f"Using model: {DEPLOYMENT_NAME}")
-
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy", 
-        "model": DEPLOYMENT_NAME,
-        "function_calling_available": True,
-        "service": "Azure OpenAI"
-    }
-
-# Basic chat endpoint - FIXED
-@app.post("/chat")
-async def chat(user_prompt: UserPrompt):
+@app.post("/ask", response_model=AskResponse)
+async def ask_agent(request: AskRequest):
+    logger.info("🚀Received /ask request")
     try:
-        # Use the pre-created chat function
-        result = await kernel.invoke(
-            function=chat_function,
-            input=user_prompt.prompt
-        )
-        return {"response": str(result)}
-    except Exception as e:
-        return {"error": str(e)}
+        if not request.prompt and not request.file_content:
+            logger.warning("Empty request received")
+            raise HTTPException(
+                status_code=400,
+                detail="Either prompt or file content must be provided"
+            )
 
-# Function calling endpoint
+        formatted_history = None
+        if request.chat_history:
+            logger.debug(f"Processing chat history with {len(request.chat_history)} messages")
+            formatted_history = [
+                {
+                    "role": msg.role,
+                    "content": msg.content
+                } 
+                for msg in request.chat_history
+            ]
+
+        logger.debug(f"Processing request with mode: {request.agentMode}")
+        response = agent_factory.process_request2(
+            prompt=request.prompt,
+            agent_mode=request.agentMode,
+            file_content=request.file_content,
+            chat_history=formatted_history
+        )
+        
+        logger.info("🚀Request processed successfully")
+        return {
+            "response": response.response,
+            "thread_id": response.thread_id,
+            "input_tokens": response.input_tokens,
+            "output_tokens": response.output_tokens,
+            "graph_data": response.graph_data,
+            "status": "success"
+        }
+
+    except HTTPException as http_err:
+        logger.error(f"HTTP error in /ask: {http_err.detail}")
+        raise http_err
+        
+    except Exception as e:
+        logger.error(f"Unexpected error in /ask: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+
 @app.post("/function-calling/execute")
-async def execute_function_calling(request: FunctionCallRequest):
+async def execute_function_calling(request: Dict[str, Any]):
+    """Execute function calling with the prompt"""
     try:
-        result = await function_calling_manager.execute_with_function_calling(
-            request.prompt,
-            request.max_tokens
-        )
+        from .app.function_calling_manager import function_calling_manager
+        prompt = request.get("prompt", "")
+        
+        logger.info(f"🚀 Executing function calling for: {prompt[:100]}...")
+        result = await function_calling_manager.execute_with_function_calling(prompt)
+        
         return {"result": result}
     except Exception as e:
+        logger.error(f"Error in function calling: {str(e)}")
         return {"error": str(e)}
 
-# Function calling demo
-@app.post("/function-calling/demo")
-async def function_calling_demo():
-    demo_prompt = "What's the weather in Tokyo and New York? Also show me AAPL stock price and analyze sentiment of 'I love this product!'"
-    try:
-        result = await function_calling_manager.execute_with_function_calling(demo_prompt)
-        return {"result": result}
-    except Exception as e:
-        return {"error": str(e)}
-
-# Get capabilities
 @app.get("/function-calling/capabilities")
 async def get_function_capabilities():
+    """Get available function calling capabilities"""
+    from .app.function_calling_manager import AVAILABLE_FUNCTIONS
+    from .config import DEPLOYMENT_NAME
+    
     return {
         "current_deployment": DEPLOYMENT_NAME,
-        "available_functions": ["get_weather", "get_stock_price", "analyze_sentiment"],
+        "available_functions": AVAILABLE_FUNCTIONS,
         "supported": True,
         "model_type": "GPT-4o"
     }
 
-# Root endpoint
+@app.get("/schema/refresh")
+async def refresh_schema():
+    """Refresh schema from Databricks"""
+    try:
+        from .schema_utils import refresh_schema
+        schema_data = refresh_schema()
+        return {"status": "success", "tables_count": len(schema_data)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/")
-async def root():
+async def health_check():
+    logger.debug("Health check endpoint called")
     return {
-        "message": "Semantic Kernel API running",
-        "endpoints": {
-            "health_check": "/health",
-            "chat": "/chat (POST)",
-            "function_calling_execute": "/function-calling/execute (POST)",
-            "function_calling_demo": "/function-calling/demo (POST)",
-            "function_capabilities": "/function-calling/capabilities (GET)"
-        },
-        "model": DEPLOYMENT_NAME
+        "status": "healthy",
+        "service": "AI Agent Backend",
+        "version": "1.1",
+        "features": ["text", "graph_generation", "nl_to_sql", "function_calling"]
     }
 
+# Add this for direct execution support
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
