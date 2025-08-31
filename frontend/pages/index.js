@@ -46,7 +46,7 @@ export default function Home() {
         content: result.data.response,
         timestamp: new Date().toLocaleTimeString(),
         status: result.data.status,
-        rawData: result.data.response // Store the raw data for formatting
+        rawData: result.data.response
       };
 
       // Add assistant response to conversation
@@ -74,6 +74,125 @@ export default function Home() {
     setMessages([]);
   };
 
+  const parseDictionaryData = (content) => {
+    // Check if this looks like dictionary data (PNL format)
+    if (content.includes("Rows returned:") && content.includes("First few rows:")) {
+      try {
+        // Extract the rows from the content
+        const lines = content.split('\n');
+        const rows = [];
+        
+        for (const line of lines) {
+          // Look for lines with dictionary format like: 1. {'key': 'value', 'key2': 'value2'}
+          if (line.match(/^\d+\.\s*\{/)) {
+            try {
+              // Extract the dictionary part
+              const dictStr = line.replace(/^\d+\.\s*/, '').trim();
+              
+              // Convert to proper JSON format
+              const jsonStr = dictStr
+                .replace(/'/g, '"')
+                .replace(/None/g, 'null')
+                .replace(/NULL/g, 'null')
+                .replace(/True/g, 'true')
+                .replace(/False/g, 'false');
+              
+              const rowData = JSON.parse(jsonStr);
+              rows.push(rowData);
+            } catch (e) {
+              console.log('Error parsing dictionary line:', e);
+            }
+          }
+        }
+        
+        if (rows.length > 0) {
+          // Get all unique keys (columns) - limit to most important ones for better display
+          const allColumns = [...new Set(rows.flatMap(row => Object.keys(row)))];
+          
+          // Prioritize important columns for better display
+          const importantColumns = [
+            'deal_num', 'tran_num', 'currency', 'volume', 'price', 'pymt', 
+            'ltd_realized_value', 'ltd_unrealized_value', 'payment_date', 'cashflow_type'
+          ];
+          
+          // Use important columns first, then others
+          const columns = [
+            ...importantColumns.filter(col => allColumns.includes(col)),
+            ...allColumns.filter(col => !importantColumns.includes(col))
+          ].slice(0, 15); // Limit to 15 columns for better display
+          
+          return (
+            <div style={{ overflowX: 'auto', marginTop: '1rem' }}>
+              <div style={{ 
+                fontSize: '0.9rem', 
+                fontWeight: 'bold', 
+                marginBottom: '0.5rem',
+                color: '#2c5282'
+              }}>
+                PNL Data ({rows.length} of {content.match(/Rows returned: (\d+)/)?.[1] || '?'} rows)
+              </div>
+              <table style={{ 
+                width: '100%', 
+                borderCollapse: 'collapse',
+                fontSize: '0.75rem'
+              }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#ebf8ff' }}>
+                    {columns.map((col, idx) => (
+                      <th key={idx} style={{ 
+                        padding: '0.4rem', 
+                        textAlign: 'left', 
+                        borderBottom: '2px solid #90cdf4',
+                        fontWeight: 'bold',
+                        whiteSpace: 'nowrap'
+                      }}>
+                        {col}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row, rowIdx) => (
+                    <tr key={rowIdx} style={{ 
+                      borderBottom: '1px solid #e2e8f0',
+                      backgroundColor: rowIdx % 2 === 0 ? '#fff' : '#f7fafc'
+                    }}>
+                      {columns.map((col, colIdx) => (
+                        <td key={colIdx} style={{ 
+                          padding: '0.4rem',
+                          maxWidth: '120px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }} title={row[col] !== undefined ? String(row[col]) : 'NULL'}>
+                          {row[col] !== undefined ? String(row[col]) : 'NULL'}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {columns.length < allColumns.length && (
+                <div style={{ 
+                  fontSize: '0.7rem', 
+                  color: '#666',
+                  fontStyle: 'italic',
+                  marginTop: '0.5rem'
+                }}>
+                  Showing {columns.length} of {allColumns.length} columns
+                </div>
+              )}
+            </div>
+          );
+        }
+      } catch (e) {
+        console.error('Error parsing dictionary data:', e);
+      }
+    }
+    
+    return null;
+  };
+
   const parseTradeData = (content) => {
     // Check if this looks like trade header data
     if (content.includes('entity_trade_header data') && content.includes('rows')) {
@@ -99,7 +218,7 @@ export default function Home() {
             }
             
             // If we have a complete row, add it to our rows array
-            if (Object.keys(currentRow).length > 5) { // Arbitrary threshold to ensure we have enough data
+            if (Object.keys(currentRow).length > 5) {
               rows.push(currentRow);
               currentRow = {};
             }
@@ -223,7 +342,13 @@ export default function Home() {
   };
 
   const formatResponse = (content) => {
-    // First try to format as trade data
+    // First try to format as dictionary data (PNL format)
+    const dictionaryDataFormatted = parseDictionaryData(content);
+    if (dictionaryDataFormatted) {
+      return dictionaryDataFormatted;
+    }
+    
+    // Then try to format as trade data
     const tradeDataFormatted = parseTradeData(content);
     if (tradeDataFormatted) {
       return tradeDataFormatted;
@@ -337,6 +462,19 @@ export default function Home() {
                   "Show me the latest 5 trades"
                 </li>
                 <li 
+                  onClick={() => setInputText("Show me 1 deal from pnl table")}
+                  style={{ 
+                    padding: '0.5rem', 
+                    backgroundColor: 'white', 
+                    margin: '0.5rem 0', 
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    border: '1px solid #e0e0e0'
+                  }}
+                >
+                  "Show me 1 deal from pnl table"
+                </li>
+                <li 
                   onClick={() => setInputText("What's the total PNL for completed trades?")}
                   style={{ 
                     padding: '0.5rem', 
@@ -349,19 +487,6 @@ export default function Home() {
                 >
                   "What's the total PNL for completed trades?"
                 </li>
-                <li 
-                  onClick={() => setInputText("Generate a SQL query to find high-value trades")}
-                  style={{ 
-                    padding: '0.5rem', 
-                    backgroundColor: 'white', 
-                    margin: '0.5rem 0', 
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    border: '1px solid #e0e0e0'
-                  }}
-                >
-                  "Generate a SQL query to find high-value trades"
-                </li>
               </ul>
             </div>
           </div>
@@ -371,7 +496,7 @@ export default function Home() {
               key={message.id}
               style={{
                 alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
-                maxWidth: '90%',
+                maxWidth: '95%',
                 marginBottom: '1rem',
                 backgroundColor: message.role === 'user' ? '#0070f3' : 
                                 message.role === 'error' ? '#ffebee' : 'white',
