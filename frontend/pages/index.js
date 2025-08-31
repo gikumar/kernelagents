@@ -10,6 +10,7 @@ export default function Home() {
   const [selectedColumns, setSelectedColumns] = useState([]);
   const [showColumnSelector, setShowColumnSelector] = useState(false);
   const [currentTableData, setCurrentTableData] = useState(null);
+  const [editingMessageId, setEditingMessageId] = useState(null);
   const messagesEndRef = useRef(null);
 
   // Auto-scroll to bottom when new messages are added
@@ -19,6 +20,23 @@ export default function Home() {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const copyToClipboard = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      // You could add a toast notification here
+      console.log('Copied to clipboard');
+    } catch (err) {
+      console.error('Failed to copy: ', err);
+    }
+  };
+
+  const editPrompt = (messageId, content) => {
+    setInputText(content);
+    setEditingMessageId(messageId);
+    // Scroll to input field
+    document.querySelector('input[type="text"]')?.focus();
   };
 
   const parseTradeData = useCallback((content) => {
@@ -124,6 +142,15 @@ export default function Home() {
     e.preventDefault();
     if (!inputText.trim() || isLoading) return;
 
+    // If editing a previous message, remove all messages after it
+    if (editingMessageId) {
+      const editIndex = messages.findIndex(msg => msg.id === editingMessageId);
+      if (editIndex !== -1) {
+        setMessages(prev => prev.slice(0, editIndex + 1));
+      }
+      setEditingMessageId(null);
+    }
+
     const userMessage = {
       id: Date.now(),
       role: 'user',
@@ -192,6 +219,7 @@ export default function Home() {
     setCurrentTableData(null);
     setSelectedColumns([]);
     setShowColumnSelector(false);
+    setEditingMessageId(null);
   };
 
   const clearConversation = () => {
@@ -199,6 +227,7 @@ export default function Home() {
     setCurrentTableData(null);
     setSelectedColumns([]);
     setShowColumnSelector(false);
+    setEditingMessageId(null);
   };
 
   const VerticalDataTable = ({ rows, columns, type }) => {
@@ -538,9 +567,54 @@ export default function Home() {
                       message.role === 'error' ? '#c62828' : 'inherit',
                 padding: '1rem',
                 borderRadius: message.role === 'user' ? '12px 12px 0 12px' : '12px 12px 12px 0',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24)'
+                boxShadow: '0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24)',
+                position: 'relative'
               }}
             >
+              {/* Message actions */}
+              <div style={{ 
+                position: 'absolute', 
+                top: '0.5rem', 
+                right: '0.5rem', 
+                display: 'flex', 
+                gap: '0.5rem',
+                opacity: 0.7,
+                transition: 'opacity 0.2s'
+              }}>
+                {message.role === 'user' && (
+                  <button
+                    onClick={() => editPrompt(message.id, message.content)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      padding: '0.25rem',
+                      borderRadius: '3px',
+                      fontSize: '0.8rem',
+                      color: 'inherit'
+                    }}
+                    title="Edit this prompt"
+                  >
+                    ✏️
+                  </button>
+                )}
+                <button
+                  onClick={() => copyToClipboard(message.content)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: '0.25rem',
+                    borderRadius: '3px',
+                    fontSize: '0.8rem',
+                    color: 'inherit'
+                  }}
+                  title="Copy response"
+                >
+                  📋
+                </button>
+              </div>
+              
               <div style={{ fontSize: '0.9rem', marginBottom: '0.5rem', opacity: 0.7 }}>
                 {message.role === 'user' ? 'You' : 
                  message.role === 'error' ? 'Error' : 'Assistant'} • {message.timestamp}
@@ -608,14 +682,15 @@ export default function Home() {
             type="text"
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
-            placeholder="Type your message here..."
+            placeholder={editingMessageId ? "Editing your prompt..." : "Type your message here..."}
             disabled={isLoading}
             style={{
               flex: 1,
               padding: '0.75rem',
               border: '1px solid #e0e0e0',
               borderRadius: '4px',
-              fontSize: '1rem'
+              fontSize: '1rem',
+              backgroundColor: editingMessageId ? '#fff9e6' : 'white'
             }}
           />
           <button 
@@ -631,11 +706,32 @@ export default function Home() {
               fontSize: '1rem'
             }}
           >
-            {isLoading ? 'Sending...' : 'Send'}
+            {isLoading ? 'Sending...' : editingMessageId ? 'Resend' : 'Send'}
           </button>
+          {editingMessageId && (
+            <button 
+              type="button"
+              onClick={() => {
+                setEditingMessageId(null);
+                setInputText('');
+              }}
+              style={{
+                padding: '0.75rem 1rem',
+                backgroundColor: '#f5f5f5',
+                color: '#757575',
+                border: '1px solid #e0e0e0',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '1rem'
+              }}
+            >
+              Cancel
+            </button>
+          )}
         </div>
         <div style={{ fontSize: '0.8rem', color: '#757575', marginTop: '0.5rem' }}>
           Conversation ID: {conversationId}
+          {editingMessageId && ' • Editing previous prompt'}
         </div>
       </form>
     </div>
