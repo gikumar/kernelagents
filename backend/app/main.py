@@ -13,6 +13,29 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pathlib import Path
 
+def setup_logging():
+    """Configure comprehensive logging"""
+    # Clear any existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # Set up root logger
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler('app.log')  # Optional: also log to file
+        ]
+    )
+    
+    # Set specific levels for noisy modules if needed
+    logging.getLogger('semantic_kernel').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+# Call this function before creating the FastAPI app
+setup_logging()
+
 # Load .env from the backend directory
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -81,6 +104,7 @@ app.add_middleware(
 class AskRequest(BaseModel):
     prompt: str
     agentMode: Optional[str] = "Balanced"
+    conversation_id: Optional[str] = "default" 
 
 class AskResponse(BaseModel):
     response: str
@@ -99,8 +123,7 @@ async def ask_agent(request: AskRequest):
         if function_calling_manager is None:
             raise HTTPException(status_code=500, detail="Function calling manager not initialized")
         
-        result = await function_calling_manager.execute_with_function_calling(request.prompt)
-        
+        result = await function_calling_manager.execute_with_function_calling(request.prompt, request.conversation_id)
         return AskResponse(
             response=result,
             status="success"
@@ -112,6 +135,23 @@ async def ask_agent(request: AskRequest):
             status_code=500,
             detail=f"Internal server error: {str(e)}"
         )
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    """Get conversation history"""
+    try:
+        global function_calling_manager
+        if function_calling_manager is None:
+            return {"error": "Function calling manager not initialized"}
+        
+        # This would require exposing the conversation storage
+        return {
+            "conversation_id": conversation_id,
+            "message": "Conversation history available internally"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    
 
 @app.post("/function-calling/execute")
 async def execute_function_calling(request: Dict[str, Any]):
