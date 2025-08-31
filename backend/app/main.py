@@ -33,13 +33,13 @@ async def lifespan(app: FastAPI):
     cache_dir = Path(__file__).parent / "cache"
     cache_dir.mkdir(exist_ok=True)
     
-    # Load schema at startup
+    # Load schema at startup - auto-refresh if not found
     try:
         from schema_utils import load_schema
-        schema_data = load_schema()
+        schema_data = load_schema()  # This will auto-refresh if cache doesn't exist
         
         if not schema_data:
-            logger.warning("❌ No schema found in cache. Please refresh schema manually.")
+            logger.warning("❌ Failed to load schema automatically")
         else:
             logger.info(f"✅ Schema loaded with {len(schema_data)} tables")
     except Exception as e:
@@ -379,7 +379,6 @@ async def debug_env_check():
         "env_file_used": str(env_path),
         "env_file_exists": env_path.exists()
     }
-
 
 if __name__ == "__main__":
     import uvicorn
