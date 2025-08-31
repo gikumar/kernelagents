@@ -22,14 +22,14 @@ logger.addHandler(ch)
 SCHEMA_FILE = Path(__file__).parent / "cache" / "databricks_schema.json"
 
 def load_schema() -> dict:
-    """Load schema from cache file"""
+    """Load schema from cache file, auto-refresh if not found"""
     logger.info(f"📋 Loading schema from: {SCHEMA_FILE}")
     
     try:
         if not SCHEMA_FILE.exists():
-            logger.warning("❌ Schema cache file does not exist.")
-            # Don't try to fetch automatically, just return empty
-            return {}
+            logger.warning("❌ Schema cache file does not exist, attempting to refresh...")
+            # Auto-refresh if schema file doesn't exist
+            return refresh_schema()
         
         with open(SCHEMA_FILE, "r") as f:
             schema = json.load(f)
@@ -39,7 +39,11 @@ def load_schema() -> dict:
         
     except Exception as e:
         logger.error(f"❌ Error loading schema: {str(e)}")
-        return {}
+        # Try to refresh if loading fails
+        try:
+            return refresh_schema()
+        except:
+            return {}
 
 def refresh_schema():
     """Refresh schema by fetching from Databricks"""
@@ -55,10 +59,11 @@ def refresh_schema():
             return schema
         else:
             logger.error("❌ Failed to refresh schema")
-            return load_schema()  # Fallback to cached schema
+            # Return empty dict if refresh fails
+            return {}
     except Exception as e:
         logger.error(f"❌ Error refreshing schema: {str(e)}")
-        return load_schema()
+        return {}
 
 def get_table_columns(table_name: str) -> list:
     """Get columns for a specific table"""
