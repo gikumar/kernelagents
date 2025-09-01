@@ -796,7 +796,7 @@ export default function Home() {
                     "Show me 1 deal from pnl table"
                   </li>
                   <li 
-                    onClick={() => setInputText("What's the total PNL for completed trades?")}
+                    onClick={() => setInputText("What is a deal in oil and gas trading?")}
                     style={{ 
                       padding: '0.5rem', 
                       backgroundColor: 'white', 
@@ -806,7 +806,7 @@ export default function Home() {
                       border: '1px solid #e0e0e0'
                     }}
                   >
-                    "What's the total PNL for completed trades?"
+                    "What is a deal in oil and gas trading?"
                   </li>
                 </ul>
               </div>

@@ -1,4 +1,4 @@
-# backend/app/config.py
+# backend/app/config.py (updated)
 from dotenv import load_dotenv
 import os
 from pathlib import Path
@@ -11,10 +11,10 @@ print(f"📁 Loading .env from: {env_path}")
 print(f"📁 .env file exists: {env_path.exists()}")
 
 # ----- AZURE OPENAI CONFIGURATION -----
-# Map your existing variables to the expected names
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_KEY = os.getenv("ENDPOINTS_KEY")  # Use ENDPOINTS_KEY as the API key
-AZURE_OPENAI_DEPLOYMENT = os.getenv("DEPLOYMENT_NAME")  # Use DEPLOYMENT_NAME
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("ENDPOINTS_KEY")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT") or os.getenv("DEPLOYMENT_NAME")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
 
 # ----- DATABRICKS CONFIGURATION -----
 DATABRICKS_SERVER_HOSTNAME = os.getenv("DATABRICKS_SERVER_HOSTNAME")
@@ -23,50 +23,42 @@ DATABRICKS_HTTP_PATH = os.getenv("DATABRICKS_HTTP_PATH")
 DATABRICKS_CATALOG = os.getenv("DATABRICKS_CATALOG", "trade_catalog")
 DATABRICKS_SCHEMA = os.getenv("DATABRICKS_SCHEMA", "trade_schema")
 
-# ----- YOUR EXISTING VARIABLES (for reference) -----
-AZURE_AI_FOUNDRY_PROJECT_ENDPOINT = os.getenv("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT")
-AZURE_AI_SERVICES_ENDPOINT = os.getenv("AZURE_AI_SERVICES_ENDPOINT")
-MODEL_ENDPOINT = os.getenv("MODEL_ENDPOINT")
-MODEL_NAME = os.getenv("MODEL_NAME")
-ENDPOINTS_KEY = os.getenv("ENDPOINTS_KEY")
-AGENT_ID = os.getenv("AGENT_ID")
-DEPLOYMENT_NAME = os.getenv("DEPLOYMENT_NAME")
-
 # ----- VALIDATION -----
 def validate_config():
     """Validate that required configuration is present"""
+    # Azure OpenAI is required for LLM functionality
     required_vars = [
-        "DATABRICKS_SERVER_HOSTNAME",
-        "DATABRICKS_ACCESS_TOKEN", 
-        "DATABRICKS_HTTP_PATH",
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_DEPLOYMENT"
     ]
     
-    # Azure OpenAI is optional for basic functionality
+    # Databricks is optional but recommended for data queries
     optional_vars = [
-        "AZURE_OPENAI_ENDPOINT",
-        "ENDPOINTS_KEY",  # This becomes AZURE_OPENAI_KEY
-        "DEPLOYMENT_NAME"  # This becomes AZURE_OPENAI_DEPLOYMENT
+        "DATABRICKS_SERVER_HOSTNAME",
+        "DATABRICKS_ACCESS_TOKEN", 
+        "DATABRICKS_HTTP_PATH"
     ]
     
     missing_required = []
     for var in required_vars:
-        if not globals().get(var):
+        if not os.getenv(var.replace("AZURE_OPENAI_", "").replace("_", "").upper()) and not globals().get(var):
             missing_required.append(var)
     
     if missing_required:
-        raise ValueError(f"Missing required environment variables: {missing_required}")
+        raise ValueError(f"Missing required Azure OpenAI environment variables: {missing_required}")
     
-    # Check if Azure OpenAI is fully configured
-    azure_configured = all([
-        os.getenv("AZURE_OPENAI_ENDPOINT"),
-        os.getenv("ENDPOINTS_KEY"),
-        os.getenv("DEPLOYMENT_NAME")
+    # Check if Databricks is configured
+    databricks_configured = all([
+        os.getenv("DATABRICKS_SERVER_HOSTNAME"),
+        os.getenv("DATABRICKS_ACCESS_TOKEN"),
+        os.getenv("DATABRICKS_HTTP_PATH")
     ])
     
-    if azure_configured:
-        print("✅ Azure OpenAI fully configured")
+    if databricks_configured:
+        print("✅ Databricks fully configured for data queries")
     else:
-        print("⚠️  Azure OpenAI not fully configured - some features may use simple mode")
+        print("⚠️  Databricks not configured - data query features will be limited")
     
     print("✅ Configuration validated successfully")
 
