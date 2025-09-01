@@ -13,6 +13,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pathlib import Path
 
+from function_calling_manager import FunctionCallingManager
+from sql_generator import SQLGenerator
+from schema_utils import load_schema, validate_schema
+
+
 def setup_logging():
     """Configure comprehensive logging"""
     # Clear any existing handlers
@@ -59,7 +64,7 @@ async def lifespan(app: FastAPI):
     # Load schema at startup - auto-refresh if not found
     try:
         from schema_utils import load_schema
-        schema_data = load_schema()  # This will auto-refresh if cache doesn't exist
+        schema_data = load_schema()
         
         if not schema_data:
             logger.warning("❌ Failed to load schema automatically")
@@ -74,6 +79,25 @@ async def lifespan(app: FastAPI):
         from semantic_kernel import Kernel
         
         kernel = Kernel()
+        
+        # FIX: Initialize Azure OpenAI service first
+        from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+        from config import (
+            AZURE_OPENAI_ENDPOINT, 
+            AZURE_OPENAI_KEY, 
+            AZURE_OPENAI_DEPLOYMENT, 
+            AZURE_OPENAI_API_VERSION
+        )
+        
+        chat_service = AzureChatCompletion(
+            service_id="azure_gpt4o",
+            deployment_name=AZURE_OPENAI_DEPLOYMENT,
+            endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_KEY,
+            api_version=AZURE_OPENAI_API_VERSION
+        )
+        kernel.add_service(chat_service)
+        
         global function_calling_manager
         function_calling_manager = FunctionCallingManager(kernel)
         function_calling_manager.register_functions()
@@ -377,6 +401,27 @@ async def import_diagnostics():
         "status": "success",
         "import_checks": import_checks
     }
+
+# Add a new endpoint for testing SQL generation
+@app.post("/generate-sql")
+async def generate_sql_endpoint(request: Dict[str, Any]):
+    """Generate SQL from natural language"""
+    try:
+        from semantic_kernel import Kernel
+        kernel = Kernel()
+        
+        sql_generator = SQLGenerator()
+        sql_query = await sql_generator.generate_sql_from_natural_language(
+            request.get("query", ""), kernel
+        )
+        
+        return {
+            "status": "success",
+            "generated_sql": sql_query,
+            "original_query": request.get("query", "")
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn

@@ -10,36 +10,57 @@ from semantic_kernel import Kernel
 from semantic_kernel.functions import kernel_function
 from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
 from semantic_kernel.contents import ChatHistory
+from semantic_kernel.connectors.ai.open_ai import OpenAIChatPromptExecutionSettings
 
 # Set up logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 class FunctionCallingManager:
     """
-    Function calling manager with intelligent routing
+    Function calling manager with intelligent routing and NL-to-SQL
     """
     
     def __init__(self, kernel: Kernel):
         self.kernel = kernel
         self.functions_registered = False
-        self._schema_cache = None
-        self._schema_last_loaded = None
         self.conversations: Dict[str, Dict] = {}
         self.chat_service = None
+        self.sql_generator = None
         
-        # Initialize Azure OpenAI
+        # Initialize components
         self._initialize_azure_openai()
+        self._initialize_sql_generator()
         
         # Register functions
         self.register_functions()
         
-        logger.info("✅ Function Calling Manager initialized")
+        logger.info("Function Calling Manager initialized successfully")
 
     def _initialize_azure_openai(self):
         """Initialize Azure OpenAI connection"""
         try:
-            from config import AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT, AZURE_OPENAI_API_VERSION
+            from config import (
+                AZURE_OPENAI_ENDPOINT, 
+                AZURE_OPENAI_KEY, 
+                AZURE_OPENAI_DEPLOYMENT, 
+                AZURE_OPENAI_API_VERSION
+            )
+            
+            # Check if service already exists
+            try:
+                existing_service = self.kernel.get_service("azure_gpt4o")
+                self.chat_service = existing_service
+                logger.info("Azure OpenAI service already exists in kernel, reusing it")
+                return
+            except ValueError:
+                # Service doesn't exist yet, create it
+                pass
+            
+            if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT]):
+                raise ValueError("Missing required Azure OpenAI configuration")
+            
+            # FIX: Import AzureChatCompletion here to avoid circular imports
+            from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
             
             self.chat_service = AzureChatCompletion(
                 service_id="azure_gpt4o",
@@ -50,11 +71,21 @@ class FunctionCallingManager:
             )
             
             self.kernel.add_service(self.chat_service)
-            logger.info("✅ Azure OpenAI GPT-4o initialized successfully")
+            logger.info("Azure OpenAI GPT-4o initialized successfully")
             
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Azure OpenAI: {str(e)}")
-            # We can still work with Databricks functions
+            logger.error(f"Failed to initialize Azure OpenAI: {str(e)}")
+            raise
+
+    def _initialize_sql_generator(self):
+        """Initialize SQL generator"""
+        try:
+            from sql_generator import SQLGenerator
+            self.sql_generator = SQLGenerator()
+            logger.info("SQL Generator initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize SQL Generator: {str(e)}")
+            raise
 
     def _get_conversation_context(self, conversation_id: str) -> Dict:
         """Get or create conversation context"""
@@ -76,186 +107,180 @@ class FunctionCallingManager:
             )
             
             if not all([DATABRICKS_SERVER_HOSTNAME, DATABRICKS_ACCESS_TOKEN, DATABRICKS_HTTP_PATH]):
-                logger.error("❌ Databricks connection parameters not configured")
+                logger.error("Databricks connection parameters not configured")
                 return None
             
             try:
                 import databricks.sql
             except ImportError as e:
-                logger.error(f"❌ Databricks SQL connector not installed: {e}")
+                logger.error(f"Databricks SQL connector not installed: {e}")
                 return None
             
-            logger.info(f"🔗 Connecting to Databricks: {DATABRICKS_SERVER_HOSTNAME}")
+            logger.info(f"Connecting to Databricks: {DATABRICKS_SERVER_HOSTNAME}")
             connection = databricks.sql.connect(
                 server_hostname=DATABRICKS_SERVER_HOSTNAME,
                 http_path=DATABRICKS_HTTP_PATH,
                 access_token=DATABRICKS_ACCESS_TOKEN
             )
             
-            logger.info("✅ Connected to Databricks successfully")
+            logger.info("Connected to Databricks successfully")
             return connection
             
         except Exception as e:
-            logger.error(f"❌ Failed to connect to Databricks: {str(e)}")
+            logger.error(f"Failed to connect to Databricks: {str(e)}")
             return None
 
-    def _validate_sql_query(self, sql_query: str) -> bool:
-        """Validate SQL query for safety"""
-        sql_lower = sql_query.lower().strip()
-        
-        destructive_keywords = ["drop", "delete", "update", "insert", "alter", "truncate", 
-                              "create", "modify", "grant", "revoke"]
-        if any(keyword in sql_lower for keyword in destructive_keywords):
-            return False
-        
-        if not (sql_lower.startswith('select') or sql_lower.startswith('with')):
-            return False
-        
-        return True
-
     @kernel_function(
-        name="get_trade_data",
-        description="Get trade data from database. Use this when user asks about trades, deals, transactions, or wants to see trade information"
+        name="query_trade_data",
+        description="Query trade data from database using natural language. Use this when user asks about trades, deals, transactions, or wants to see trade information"
     )
-    async def get_trade_data(self, query: str = "", limit: int = 10) -> str:
-        """Get trade data based on user query"""
+    async def query_trade_data(self, natural_language_query: str = "") -> str:
+        """Query trade data using natural language to SQL conversion"""
         try:
-            logger.info(f"📊 Getting trade data for: {query}")
+            logger.info(f"Processing natural language query: {natural_language_query}")
             
-            connection = self._get_databricks_connection()
-            if connection is None:
-                return "❌ Database connection not available. Please check Databricks configuration."
+            if not self.sql_generator:
+                return "SQL Generator not available. Please check configuration."
             
-            try:
-                base_query = "SELECT * FROM trade_catalog.trade_schema.entity_trade_header"
-                
-                # Add basic filtering based on query
-                if "recent" in query.lower():
-                    base_query += " WHERE trade_date >= CURRENT_DATE - INTERVAL '30' DAY"
-                elif "completed" in query.lower():
-                    base_query += " WHERE status = 'completed'"
-                
-                base_query += f" LIMIT {limit}"
-                
-                with connection.cursor() as cursor:
-                    cursor.execute(base_query)
-                    
-                    columns = [desc[0] for desc in cursor.description]
-                    data = []
-                    
-                    for row in cursor.fetchall():
-                        row_dict = {}
-                        for idx, col in enumerate(columns):
-                            value = row[idx]
-                            if value is None:
-                                row_dict[col] = "NULL"
-                            elif hasattr(value, 'isoformat'):
-                                row_dict[col] = value.isoformat()
-                            else:
-                                row_dict[col] = str(value)
-                        data.append(row_dict)
-                    
-                    result = f"📊 Trade Data ({len(data)} rows):\n\n"
-                    for item in data[:5]:  # Show first 5 rows
-                        result += "• "
-                        for col, value in item.items():
-                            result += f"{col}: {value} | "
-                        result = result[:-3] + "\n"
-                    
-                    if len(data) > 5:
-                        result += f"\n... and {len(data) - 5} more rows\n"
-                    
-                    return result
-                    
-            except Exception as e:
-                logger.error(f"❌ Query execution error: {str(e)}")
-                return f"❌ Query execution failed: {str(e)}"
-                
-            finally:
-                connection.close()
+            # Generate SQL from natural language
+            sql_query = await self.sql_generator.generate_sql_from_natural_language(
+                natural_language_query, self.kernel
+            )
+            
+            logger.info(f"Generated SQL: {sql_query}")
+            
+            # Execute the query
+            return await self._execute_sql_query(sql_query, natural_language_query)
             
         except Exception as e:
-            error_msg = f"❌ Error getting trade data: {str(e)}"
+            error_msg = f"Error processing query: {str(e)}"
             logger.error(error_msg)
             return error_msg
 
-    @kernel_function(
-        name="get_pnl_data",
-        description="Get profit and loss data. Use this when user asks about P&L, profits, losses, financial performance, or revenue"
-    )
-    async def get_pnl_data(self, query: str = "", limit: int = 10) -> str:
-        """Get P&L data based on user query"""
+    async def _execute_sql_query(self, sql_query: str, original_query: str = "") -> str:
+        """Execute SQL query and format results"""
+        connection = self._get_databricks_connection()
+        if connection is None:
+            return "Database connection not available. Please check Databricks configuration."
+        
         try:
-            logger.info(f"📊 Getting P&L data for: {query}")
-            
-            connection = self._get_databricks_connection()
-            if connection is None:
-                return "❌ Database connection not available. Please check Databricks configuration."
-            
-            try:
-                base_query = "SELECT * FROM trade_catalog.trade_schema.entity_pnl_detail"
+            with connection.cursor() as cursor:
+                cursor.execute(sql_query)
                 
-                # Add basic filtering
-                if "recent" in query.lower():
-                    base_query += " WHERE pnl_date >= CURRENT_DATE - INTERVAL '30' DAY"
+                columns = [desc[0] for desc in cursor.description]
+                data = []
                 
-                base_query += f" LIMIT {limit}"
+                for row in cursor.fetchall():
+                    row_dict = {}
+                    for idx, col in enumerate(columns):
+                        value = row[idx]
+                        if value is None:
+                            row_dict[col] = "NULL"
+                        elif hasattr(value, 'isoformat'):
+                            row_dict[col] = value.isoformat()
+                        else:
+                            row_dict[col] = str(value)
+                    data.append(row_dict)
                 
-                with connection.cursor() as cursor:
-                    cursor.execute(base_query)
-                    
-                    columns = [desc[0] for desc in cursor.description]
-                    data = []
-                    
-                    for row in cursor.fetchall():
-                        row_dict = {}
-                        for idx, col in enumerate(columns):
-                            value = row[idx]
-                            if value is None:
-                                row_dict[col] = "NULL"
-                            elif hasattr(value, 'isoformat'):
-                                row_dict[col] = value.isoformat()
-                            else:
-                                row_dict[col] = str(value)
-                        data.append(row_dict)
-                    
-                    result = f"📊 P&L Data ({len(data)} rows):\n\n"
-                    for item in data[:5]:
-                        result += "• "
-                        for col, value in item.items():
-                            result += f"{col}: {value} | "
-                        result = result[:-3] + "\n"
-                    
-                    if len(data) > 5:
-                        result += f"\n... and {len(data) - 5} more rows\n"
-                    
-                    return result
-                    
-            except Exception as e:
-                logger.error(f"❌ Query execution error: {str(e)}")
-                return f"❌ Query execution failed: {str(e)}"
+                # Format results
+                result = self._format_query_results(data, columns, sql_query, original_query)
+                return result
                 
-            finally:
-                connection.close()
-            
         except Exception as e:
-            error_msg = f"❌ Error getting P&L data: {str(e)}"
-            logger.error(error_msg)
-            return error_msg
+            logger.error(f"Query execution error: {str(e)}")
+            return f"Query execution failed: {str(e)}"
+            
+        finally:
+            connection.close()
+
+    def _format_query_results(self, data: list, columns: list, sql_query: str, original_query: str) -> str:
+        """Format query results intelligently"""
+        if not data:
+            return f"No results found for: '{original_query}'\n\nQuery: {sql_query}"
+        
+        result = f"Query Results ({len(data)} row{'s' if len(data) != 1 else ''}):\n\n"
+        
+        # Format based on data size
+        if len(data) <= 5 and len(columns) <= 8:
+            result += self._format_detailed_table(data, columns)
+        else:
+            result += self._format_compact_table(data, columns)
+        
+        # Add query context
+        result += f"\nGenerated from: '{original_query}'\n"
+        result += f"SQL: {sql_query}\n"
+        
+        return result
+
+    def _format_detailed_table(self, data: list, columns: list) -> str:
+        """Format data as a detailed table"""
+        result = ""
+        for i, row in enumerate(data, 1):
+            result += f"**Row {i}:**\n"
+            for col in columns:
+                value = row.get(col, "N/A")
+                if value and len(str(value)) > 100:
+                    value = str(value)[:100] + "..."
+                result += f"  • {col}: {value}\n"
+            result += "\n"
+        return result
+
+    def _format_compact_table(self, data: list, columns: list) -> str:
+        """Format data as a compact table"""
+        # Select key columns for display
+        key_columns = self._get_key_columns(columns)
+        
+        # Create header
+        headers = ["#"] + key_columns
+        header_line = "| " + " | ".join(headers) + " |"
+        separator = "|" + "|".join(["---" for _ in headers]) + "|"
+        
+        result = header_line + "\n" + separator + "\n"
+        
+        # Add rows
+        for i, row in enumerate(data, 1):
+            row_values = [str(i)]
+            for col in key_columns:
+                value = row.get(col, "N/A")
+                if value and len(str(value)) > 25:
+                    value = str(value)[:22] + "..."
+                row_values.append(str(value))
+            result += "| " + " | ".join(row_values) + " |\n"
+        
+        return result
+
+    def _get_key_columns(self, all_columns: list) -> list:
+        """Identify key columns to display"""
+        key_columns = []
+        priority_columns = [
+            'deal_num', 'tran_num', 'trade_date', 'currency', 'amount', 
+            'volume', 'price', 'trader', 'buy_sell', 'status'
+        ]
+        
+        # Add priority columns that exist
+        for col in priority_columns:
+            if col in all_columns:
+                key_columns.append(col)
+        
+        # Fill remaining slots
+        if len(key_columns) < 6:
+            additional_cols = [col for col in all_columns if col not in key_columns]
+            key_columns.extend(additional_cols[:6 - len(key_columns)])
+        
+        return key_columns
 
     @kernel_function(
-    name="explain_concept",
-    description="Explain trading concepts, definitions, or general information. Use this when user asks 'what is', 'explain', 'define', or wants conceptual understanding"
-)
+        name="explain_concept",
+        description="Explain trading concepts, definitions, or general information"
+    )
     async def explain_concept(self, concept: str) -> str:
         """Explain trading concepts using LLM"""
         try:
-            logger.info(f"💬 Explaining concept: {concept}")
+            logger.info(f"Explaining concept: {concept}")
             
             if not self.chat_service:
-                return "❌ LLM service not available. Please check Azure OpenAI configuration."
+                return "LLM service not available. Please check Azure OpenAI configuration."
             
-            # Use LLM to explain the concept - Simple direct approach
             explanation_prompt = f"""
             Please provide a clear, comprehensive explanation of '{concept}' in the context of trading and finance.
             
@@ -266,116 +291,80 @@ class FunctionCallingManager:
             4. Real-world examples or use cases
             5. Any related concepts or terminology
             
-            Make it professional yet accessible for someone with basic trading knowledge.
+            Make it professional yet accessible.
             """
             
-            # Create simple chat history
+            # Create chat history
             chat_history = ChatHistory()
             chat_history.add_system_message("You are a helpful trading assistant that provides clear explanations.")
             chat_history.add_user_message(explanation_prompt)
             
-            # Import the required settings class
-            from semantic_kernel.connectors.ai.open_ai import OpenAIChatPromptExecutionSettings
-            
-            # Create settings object
+            # Create settings
             settings = OpenAIChatPromptExecutionSettings(
                 service_id="azure_gpt4o",
                 max_tokens=1000,
                 temperature=0.7
             )
             
-            # Use the chat service with proper settings
-            try:
-                result = await self.chat_service.get_chat_message_contents(
-                    chat_history=chat_history,
-                    settings=settings
-                )
-                if result and len(result) > 0:
-                    return f"**Explanation of '{concept}':**\n\n{result[0].content}"
-            except Exception as e:
-                logger.error(f"❌ Error with get_chat_message_contents: {str(e)}")
-                # Fallback explanation
-                return f"**Explanation of '{concept}':**\n\nIn oil and gas trading, a deal typically refers to a negotiated agreement between parties to buy, sell, or exchange commodities like oil and gas under specific terms, including price, quantity, delivery timing, and quality specifications. Deals can be spot transactions for immediate delivery or forward contracts for future delivery."
+            # Generate response
+            result = await self.chat_service.get_chat_message_contents(
+                chat_history=chat_history,
+                settings=settings
+            )
             
-            return f"❌ Could not generate explanation for '{concept}'."
+            if result and len(result) > 0:
+                return f"**Explanation of '{concept}':**\n\n{result[0].content}"
+            
+            return f"Could not generate explanation for '{concept}'."
             
         except Exception as e:
-            logger.error(f"❌ Error explaining concept: {str(e)}")
-            return f"❌ I apologize, but I encountered an error while trying to explain '{concept}'. Please try again."
-
-
+            logger.error(f"Error explaining concept: {str(e)}")
+            return f"I apologize, but I encountered an error while explaining '{concept}': {str(e)}"
 
     @kernel_function(
-        name="execute_custom_query",
-        description="Execute a specific SQL query on the database. Use this when user provides explicit SQL code or very specific data requirements"
+        name="execute_custom_query", 
+        description="Execute a specific SQL query on the database"
     )
     async def execute_custom_query(self, sql_query: str) -> str:
         """Execute custom SQL query"""
         try:
-            logger.info(f"📋 Executing custom SQL: {sql_query[:100]}...")
+            logger.info(f"Executing custom SQL: {sql_query[:100]}...")
             
             if not self._validate_sql_query(sql_query):
-                return "❌ For safety, only SELECT queries are allowed. Destructive operations are blocked."
+                return "For safety, only SELECT queries are allowed."
             
-            connection = self._get_databricks_connection()
-            if connection is None:
-                return "❌ Database connection not available. Please check Databricks configuration."
-            
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute(sql_query)
-                    
-                    columns = [desc[0] for desc in cursor.description]
-                    data = []
-                    for row in cursor.fetchall():
-                        row_dict = {}
-                        for idx, col in enumerate(columns):
-                            value = row[idx]
-                            if value is None:
-                                row_dict[col] = "NULL"
-                            elif hasattr(value, 'isoformat'):
-                                row_dict[col] = value.isoformat()
-                            else:
-                                row_dict[col] = str(value)
-                        data.append(row_dict)
-                    
-                    result = f"✅ Custom Query Results:\n\n"
-                    result += f"Executed: {sql_query}\n\n"
-                    result += f"Columns: {', '.join(columns)}\n"
-                    result += f"Rows returned: {len(data)}\n\n"
-                    
-                    if data:
-                        result += "First few rows:\n"
-                        for i, row in enumerate(data[:3]):
-                            result += f"{i+1}. {row}\n"
-                    
-                    return result
-                    
-            except Exception as e:
-                return f"❌ SQL execution failed: {str(e)}"
-                
-            finally:
-                connection.close()
+            return await self._execute_sql_query(sql_query, "Custom SQL Query")
             
         except Exception as e:
-            error_msg = f"❌ Error executing custom query: {str(e)}"
+            error_msg = f"Error executing custom query: {str(e)}"
             logger.error(error_msg)
             return error_msg
 
+    def _validate_sql_query(self, sql_query: str) -> bool:
+        """Validate SQL query for safety"""
+        sql_lower = sql_query.lower().strip()
+        
+        destructive_keywords = [
+            "drop", "delete", "update", "insert", "alter", "truncate", 
+            "create", "modify", "grant", "revoke"
+        ]
+        
+        if any(keyword in sql_lower for keyword in destructive_keywords):
+            return False
+        
+        if not (sql_lower.startswith('select') or sql_lower.startswith('with')):
+            return False
+        
+        return True
+
     def register_functions(self):
         """Register functions with the kernel"""
-        logger.info("🔧 Registering functions...")
+        logger.info("Registering functions...")
         
-        # Register all functions
         self.kernel.add_function(
             plugin_name="trading_assistant", 
-            function_name="get_trade_data", 
-            function=self.get_trade_data
-        )
-        self.kernel.add_function(
-            plugin_name="trading_assistant", 
-            function_name="get_pnl_data", 
-            function=self.get_pnl_data
+            function_name="query_trade_data", 
+            function=self.query_trade_data
         )
         self.kernel.add_function(
             plugin_name="trading_assistant", 
@@ -389,7 +378,7 @@ class FunctionCallingManager:
         )
         
         self.functions_registered = True
-        logger.info("✅ All functions registered")
+        logger.info("All functions registered successfully")
 
     async def _analyze_prompt_intent(self, prompt: str) -> str:
         """Analyze the prompt intent using keyword matching"""
@@ -399,13 +388,15 @@ class FunctionCallingManager:
         if any(word in prompt_lower for word in ["what is", "explain", "define", "how does", "tell me about"]):
             return "explain"
         
-        # Trade data requests
-        if any(word in prompt_lower for word in ["trade", "deal", "transaction", "show trades", "get trades", "list trades"]):
-            return "trade_data"
+        # Data queries
+        data_patterns = [
+            "show", "get", "list", "find", "query", "select",
+            "how many", "what are the", "give me", "display",
+            "trades", "deals", "transactions", "records", "data"
+        ]
         
-        # P&L data requests
-        if any(word in prompt_lower for word in ["pnl", "profit", "loss", "revenue", "financial", "performance"]):
-            return "pnl_data"
+        if any(pattern in prompt_lower for pattern in data_patterns):
+            return "data_query"
         
         # SQL queries
         if "select" in prompt_lower and ("from" in prompt_lower or "where" in prompt_lower):
@@ -417,51 +408,45 @@ class FunctionCallingManager:
         """Get response from LLM for general conversation"""
         try:
             if not self.chat_service:
-                return "❌ LLM service not available for general conversation."
+                return "LLM service not available for general conversation."
             
-            # Create simple chat history
             chat_history = ChatHistory()
             chat_history.add_system_message("You are a helpful trading assistant.")
             chat_history.add_user_message(prompt)
             
-            # Import the required settings class
-            from semantic_kernel.connectors.ai.open_ai import OpenAIChatPromptExecutionSettings
-            
-            # Create settings object
             settings = OpenAIChatPromptExecutionSettings(
                 service_id="azure_gpt4o",
                 max_tokens=1000,
                 temperature=0.7
             )
             
-            # Try to get response with proper settings
-            try:
-                result = await self.chat_service.get_chat_message_contents(
-                    chat_history=chat_history,
-                    settings=settings
-                )
-                if result and len(result) > 0:
-                    return str(result[0].content)
-            except Exception as e:
-                logger.error(f"❌ Error with get_chat_message_contents: {str(e)}")
-                return "I'm here to help with your trading questions. How can I assist you today?"
+            result = await self.chat_service.get_chat_message_contents(
+                chat_history=chat_history,
+                settings=settings
+            )
             
-            return "❌ Could not generate response."
+            if result and len(result) > 0:
+                return str(result[0].content)
+            
+            return "Could not generate response."
                 
         except Exception as e:
-            logger.error(f"❌ Error getting LLM response: {str(e)}")
-            return f"❌ Error generating response: {str(e)}"
-    
+            logger.error(f"Error getting LLM response: {str(e)}")
+            return f"Error generating response: {str(e)}"
 
     async def execute_with_function_calling(self, prompt: str, conversation_id: str = "default") -> str:
         """Intelligently route requests using intent analysis"""
         context = self._get_conversation_context(conversation_id)
-        context["messages"].append({"role": "user", "content": prompt, "timestamp": time.time()})
+        context["messages"].append({
+            "role": "user", 
+            "content": prompt, 
+            "timestamp": time.time()
+        })
         
         try:
             # Analyze the prompt intent
             intent = await self._analyze_prompt_intent(prompt)
-            logger.info(f"🎯 Detected intent: {intent} for prompt: {prompt[:50]}...")
+            logger.info(f"Detected intent: {intent} for prompt: {prompt[:50]}...")
             
             if intent == "explain":
                 # Extract the concept to explain
@@ -475,74 +460,47 @@ class FunctionCallingManager:
                 
                 result = await self.explain_concept(concept)
             
-            elif intent == "trade_data":
-                # Extract parameters for trade data
-                query = ""
-                limit = 10
-                
-                if "latest" in prompt.lower() or "recent" in prompt.lower():
-                    query = "recent"
-                if any(word in prompt.lower() for word in ["5", "five", "first five"]):
-                    limit = 5
-                elif any(word in prompt.lower() for word in ["10", "ten"]):
-                    limit = 10
-                
-                result = await self.get_trade_data(query, limit)
-            
-            elif intent == "pnl_data":
-                # Extract parameters for P&L data
-                query = ""
-                limit = 10
-                result = await self.get_pnl_data(query, limit)
+            elif intent == "data_query":
+                result = await self.query_trade_data(prompt)
             
             elif intent == "custom_query":
-                # Use the prompt as SQL query
                 result = await self.execute_custom_query(prompt)
             
             else:  # direct or general conversation
                 result = await self._get_llm_response(prompt, context)
             
-            context["messages"].append({"role": "assistant", "content": str(result), "timestamp": time.time()})
+            context["messages"].append({
+                "role": "assistant", 
+                "content": str(result), 
+                "timestamp": time.time()
+            })
+            
             return str(result)
             
         except Exception as e:
-            error_msg = f"❌ Error processing request: {str(e)}"
+            error_msg = f"Error processing request: {str(e)}"
             logger.error(error_msg)
             
-            # Try to use explain_concept as fallback for conceptual questions
-            if any(word in prompt.lower() for word in ["what is", "explain", "define"]):
-                try:
-                    concept = prompt
-                    fallback_result = await self.explain_concept(concept)
-                    context["messages"].append({"role": "assistant", "content": fallback_result, "timestamp": time.time()})
-                    return fallback_result
-                except:
-                    pass
+            context["messages"].append({
+                "role": "assistant", 
+                "content": error_msg, 
+                "timestamp": time.time()
+            })
             
-            context["messages"].append({"role": "assistant", "content": error_msg, "timestamp": time.time()})
             return error_msg
 
 # Available functions for capabilities endpoint
 AVAILABLE_FUNCTIONS = [
     {
-        "name": "get_trade_data",
-        "description": "Get trade and deal information from database",
+        "name": "query_trade_data",
+        "description": "Query trade and deal information from database using natural language",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query or filter"},
-                "limit": {"type": "integer", "description": "Number of records to return"}
-            }
-        }
-    },
-    {
-        "name": "get_pnl_data", 
-        "description": "Get profit and loss data from database",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query or filter"},
-                "limit": {"type": "integer", "description": "Number of records to return"}
+                "natural_language_query": {
+                    "type": "string", 
+                    "description": "Natural language query describing what data to retrieve"
+                }
             }
         }
     },
@@ -552,7 +510,10 @@ AVAILABLE_FUNCTIONS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "concept": {"type": "string", "description": "Concept to explain"}
+                "concept": {
+                    "type": "string", 
+                    "description": "Concept to explain"
+                }
             }
         }
     },
@@ -562,7 +523,10 @@ AVAILABLE_FUNCTIONS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "sql_query": {"type": "string", "description": "SQL query to execute"}
+                "sql_query": {
+                    "type": "string", 
+                    "description": "SQL query to execute"
+                }
             }
         }
     }
