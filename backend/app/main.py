@@ -13,6 +13,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pathlib import Path
 
+from function_calling_manager import FunctionCallingManager
+from sql_generator import SQLGenerator
+from schema_utils import load_schema, validate_schema
+
+
 def setup_logging():
     """Configure comprehensive logging"""
     # Clear any existing handlers
@@ -59,7 +64,7 @@ async def lifespan(app: FastAPI):
     # Load schema at startup - auto-refresh if not found
     try:
         from schema_utils import load_schema
-        schema_data = load_schema()  # This will auto-refresh if cache doesn't exist
+        schema_data = load_schema()
         
         if not schema_data:
             logger.warning("❌ Failed to load schema automatically")
@@ -74,6 +79,25 @@ async def lifespan(app: FastAPI):
         from semantic_kernel import Kernel
         
         kernel = Kernel()
+        
+        # FIX: Initialize Azure OpenAI service first
+        from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+        from config import (
+            AZURE_OPENAI_ENDPOINT, 
+            AZURE_OPENAI_KEY, 
+            AZURE_OPENAI_DEPLOYMENT, 
+            AZURE_OPENAI_API_VERSION
+        )
+        
+        chat_service = AzureChatCompletion(
+            service_id="azure_gpt4o",
+            deployment_name=AZURE_OPENAI_DEPLOYMENT,
+            endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_KEY,
+            api_version=AZURE_OPENAI_API_VERSION
+        )
+        kernel.add_service(chat_service)
+        
         global function_calling_manager
         function_calling_manager = FunctionCallingManager(kernel)
         function_calling_manager.register_functions()
@@ -113,17 +137,19 @@ class AskResponse(BaseModel):
 @app.post("/ask", response_model=AskResponse)
 async def ask_agent(request: AskRequest):
     """
-    Simple endpoint that uses Semantic Kernel function calling
+    Intelligent endpoint that routes to LLM or Databricks based on content
     """
     logger.info(f"🚀 Received /ask request: {request.prompt[:100]}...")
     
     try:
-        # Use the global function_calling_manager instance
         global function_calling_manager
         if function_calling_manager is None:
             raise HTTPException(status_code=500, detail="Function calling manager not initialized")
         
-        result = await function_calling_manager.execute_with_function_calling(request.prompt, request.conversation_id)
+        result = await function_calling_manager.execute_with_function_calling(
+            request.prompt, 
+            request.conversation_id
+        )
         return AskResponse(
             response=result,
             status="success"
@@ -136,6 +162,38 @@ async def ask_agent(request: AskRequest):
             detail=f"Internal server error: {str(e)}"
         )
 
+# Add a new endpoint for explicit LLM-only requests
+@app.post("/ask/llm", response_model=AskResponse)
+async def ask_llm_only(request: AskRequest):
+    """Force request to be handled by LLM only"""
+    try:
+        global function_calling_manager
+        if function_calling_manager is None:
+            raise HTTPException(status_code=500, detail="Function calling manager not initialized")
+        
+        result = await function_calling_manager.handle_llm_only(request.prompt, request.conversation_id)
+        return AskResponse(response=result, status="success")
+        
+    except Exception as e:
+        logger.error(f"Error in /ask/llm: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Add a new endpoint for explicit data queries
+@app.post("/ask/data", response_model=AskResponse)
+async def ask_data_only(request: AskRequest):
+    """Force request to be handled as data query"""
+    try:
+        global function_calling_manager
+        if function_calling_manager is None:
+            raise HTTPException(status_code=500, detail="Function calling manager not initialized")
+        
+        result = await function_calling_manager.handle_databricks_only(request.prompt, request.conversation_id)
+        return AskResponse(response=result, status="success")
+        
+    except Exception as e:
+        logger.error(f"Error in /ask/data: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str):
     """Get conversation history"""
@@ -144,27 +202,27 @@ async def get_conversation(conversation_id: str):
         if function_calling_manager is None:
             return {"error": "Function calling manager not initialized"}
         
-        # This would require exposing the conversation storage
+        conversation = function_calling_manager._get_conversation_context(conversation_id)
         return {
             "conversation_id": conversation_id,
-            "message": "Conversation history available internally"
+            "messages": conversation.get("messages", []),
+            "message_count": len(conversation.get("messages", []))
         }
     except Exception as e:
         return {"error": str(e)}
-    
 
 @app.post("/function-calling/execute")
 async def execute_function_calling(request: Dict[str, Any]):
     """Execute function calling with the prompt"""
     try:
-        # Use the global function_calling_manager instance
         global function_calling_manager
         if function_calling_manager is None:
             return {"error": "Function calling manager not initialized"}
         
         prompt = request.get("prompt", "")
+        conversation_id = request.get("conversation_id", "default")
         logger.info(f"🚀 Executing function calling for: {prompt[:100]}...")
-        result = await function_calling_manager.execute_with_function_calling(prompt)
+        result = await function_calling_manager.execute_with_function_calling(prompt, conversation_id)
         
         return {"result": result}
     except Exception as e:
@@ -175,15 +233,15 @@ async def execute_function_calling(request: Dict[str, Any]):
 async def get_function_capabilities():
     """Get available function calling capabilities"""
     try:
-        # Import directly from the module, not the global instance
         from function_calling_manager import AVAILABLE_FUNCTIONS
-        from config import DEPLOYMENT_NAME
+        from config import AZURE_OPENAI_DEPLOYMENT
         
         return {
-            "current_deployment": DEPLOYMENT_NAME,
+            "current_deployment": AZURE_OPENAI_DEPLOYMENT,
             "available_functions": AVAILABLE_FUNCTIONS,
             "supported": True,
-            "model_type": "GPT-4o"
+            "model_type": "GPT-4o",
+            "features": ["intelligent_routing", "databricks_integration", "llm_conversation"]
         }
     except Exception as e:
         return {"error": str(e)}
@@ -198,34 +256,42 @@ async def refresh_schema():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@app.get("/")
-async def health_check():
-    return {
-        "status": "healthy",
-        "service": "AI Agent Backend",
-        "version": "1.1",
-        "features": ["function_calling", "databricks_query"]
-    }
-
-@app.get("/diagnostics/databricks")
-async def databricks_diagnostics():
-    """Diagnostic endpoint to check Databricks connection"""
+@app.get("/health/llm")
+async def health_check_llm():
+    """Check LLM health status"""
     try:
-        from function_calling_manager import FunctionCallingManager
-        from semantic_kernel import Kernel
+        global function_calling_manager
+        if function_calling_manager is None:
+            return {"status": "error", "message": "Function calling manager not initialized"}
         
-        kernel = Kernel()
-        fc_manager = FunctionCallingManager(kernel)
+        if function_calling_manager.llm_manager is None:
+            return {"status": "error", "message": "LLM manager not available"}
         
-        # Test connection
-        connection = fc_manager._get_databricks_connection()
+        # Test LLM with a simple prompt
+        test_prompt = "Hello, are you working?"
+        response = await function_calling_manager.llm_manager.generate_response(test_prompt)
+        
+        return {
+            "status": "success", 
+            "message": "LLM is working",
+            "test_response": response[:100] + "..." if len(response) > 100 else response
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/health/databricks")
+async def health_check_databricks():
+    """Check Databricks health status"""
+    try:
+        global function_calling_manager
+        if function_calling_manager is None:
+            return {"status": "error", "message": "Function calling manager not initialized"}
+        
+        # Test Databricks connection
+        connection = function_calling_manager._get_databricks_connection()
         
         if connection is None:
-            return {
-                "status": "error",
-                "message": "Could not establish Databricks connection",
-                "details": "Check your .env file and network connectivity"
-            }
+            return {"status": "error", "message": "Could not establish Databricks connection"}
         
         # Test a simple query
         try:
@@ -254,6 +320,15 @@ async def databricks_diagnostics():
             "error": str(e)
         }
 
+@app.get("/")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "AI Agent Backend with Intelligent Routing",
+        "version": "2.0",
+        "features": ["intelligent_routing", "llm_conversation", "databricks_query", "function_calling"]
+    }
+
 @app.get("/diagnostics/detailed")
 async def detailed_diagnostics():
     """Detailed diagnostic including environment variables"""
@@ -266,15 +341,16 @@ async def detailed_diagnostics():
         # Check actual environment variables
         import os
         env_vars = {
+            "AZURE_OPENAI_ENDPOINT": os.getenv("AZURE_OPENAI_ENDPOINT"),
+            "AZURE_OPENAI_DEPLOYMENT": os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            "AZURE_OPENAI_API_KEY": "***" + (os.getenv("AZURE_OPENAI_API_KEY")[-4:] if os.getenv("AZURE_OPENAI_API_KEY") and len(os.getenv("AZURE_OPENAI_API_KEY")) > 4 else "none"),
             "DATABRICKS_SERVER_HOSTNAME": os.getenv("DATABRICKS_SERVER_HOSTNAME"),
             "DATABRICKS_ACCESS_TOKEN": "***" + (os.getenv("DATABRICKS_ACCESS_TOKEN")[-4:] if os.getenv("DATABRICKS_ACCESS_TOKEN") and len(os.getenv("DATABRICKS_ACCESS_TOKEN")) > 4 else "none"),
-            "DATABRICKS_HTTP_PATH": os.getenv("DATABRICKS_HTTP_PATH"),
-            "DATABRICKS_CATALOG": os.getenv("DATABRICKS_CATALOG"),
-            "DATABRICKS_SCHEMA": os.getenv("DATABRICKS_SCHEMA")
+            "DATABRICKS_HTTP_PATH": os.getenv("DATABRICKS_HTTP_PATH")
         }
         
         # Check if required vars are set
-        required_vars = ["DATABRICKS_SERVER_HOSTNAME", "DATABRICKS_ACCESS_TOKEN", "DATABRICKS_HTTP_PATH"]
+        required_vars = ["AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_DEPLOYMENT"]
         missing_vars = [var for var in required_vars if not os.getenv(var)]
         
         return {
@@ -293,80 +369,6 @@ async def detailed_diagnostics():
             "error": str(e)
         }
 
-@app.get("/diagnostics/connection-test")
-async def connection_test():
-    """Test Databricks connection with different parameters"""
-    try:
-        import os
-        import databricks.sql
-        from databricks.sql.exc import Error
-        
-        server = os.getenv("DATABRICKS_SERVER_HOSTNAME")
-        token = os.getenv("DATABRICKS_ACCESS_TOKEN")
-        http_path = os.getenv("DATABRICKS_HTTP_PATH")
-        
-        if not all([server, token, http_path]):
-            return {
-                "status": "error",
-                "message": "Missing required environment variables",
-                "server_provided": bool(server),
-                "token_provided": bool(token),
-                "http_path_provided": bool(http_path)
-            }
-        
-        # Test 1: Basic connection
-        try:
-            connection = databricks.sql.connect(
-                server_hostname=server,
-                http_path=http_path,
-                access_token=token
-            )
-            connection.close()
-            basic_connect = "✅ Success"
-        except Error as e:
-            basic_connect = f"❌ Failed: {str(e)}"
-        except Exception as e:
-            basic_connect = f"❌ Unexpected error: {str(e)}"
-        
-        # Test 2: Connection with different parameters
-        test_results = {"basic_connection": basic_connect}
-        
-        # Test with different HTTP path variations
-        http_path_variations = [
-            http_path,
-            http_path.rstrip('/'),
-            http_path + '/' if not http_path.endswith('/') else http_path
-        ]
-        
-        for i, path in enumerate(set(http_path_variations)):
-            try:
-                connection = databricks.sql.connect(
-                    server_hostname=server,
-                    http_path=path,
-                    access_token=token
-                )
-                connection.close()
-                test_results[f"http_path_variation_{i}"] = f"✅ Success with: {path}"
-            except Exception as e:
-                test_results[f"http_path_variation_{i}"] = f"❌ Failed with {path}: {str(e)}"
-        
-        return {
-            "status": "success",
-            "connection_tests": test_results,
-            "used_parameters": {
-                "server": server,
-                "http_path_original": http_path,
-                "token_length": len(token) if token else 0
-            }
-        }
-            
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": "Connection test failed",
-            "error": str(e)
-        }
-
 @app.get("/diagnostics/imports")
 async def import_diagnostics():
     """Check if required packages can be imported"""
@@ -381,44 +383,45 @@ async def import_diagnostics():
     except Exception as e:
         import_checks["databricks.sql"] = f"❌ Unexpected error: {e}"
     
-    # Check numpy (common dependency issue)
-    try:
-        import numpy
-        import_checks["numpy"] = f"✅ Success (version: {numpy.__version__})"
-    except Exception as e:
-        import_checks["numpy"] = f"❌ Failed: {e}"
-    
-    # Check other dependencies
+    # Check semantic_kernel
     try:
         import semantic_kernel
-        import_checks["semantic_kernel"] = "✅ Success"
+        import_checks["semantic_kernel"] = f"✅ Success (version: {semantic_kernel.__version__})"
     except Exception as e:
         import_checks["semantic_kernel"] = f"❌ Failed: {e}"
+    
+    # Check openai
+    try:
+        import openai
+        import_checks["openai"] = f"✅ Success (version: {openai.__version__})"
+    except Exception as e:
+        import_checks["openai"] = f"❌ Failed: {e}"
     
     return {
         "status": "success",
         "import_checks": import_checks
     }
 
-
-@app.get("/debug/env-check")
-async def debug_env_check():
-    """Debug endpoint to see what environment variables are available"""
-    import os
-    from dotenv import load_dotenv
-    from pathlib import Path
-    
-    # Load from correct location
-    env_path = Path(__file__).parent.parent / ".env"
-    load_dotenv(dotenv_path=env_path)
-    
-    return {
-        "server": os.getenv("DATABRICKS_SERVER_HOSTNAME"),
-        "http_path": os.getenv("DATABRICKS_HTTP_PATH"),
-        "token_set": bool(os.getenv("DATABRICKS_ACCESS_TOKEN")),
-        "env_file_used": str(env_path),
-        "env_file_exists": env_path.exists()
-    }
+# Add a new endpoint for testing SQL generation
+@app.post("/generate-sql")
+async def generate_sql_endpoint(request: Dict[str, Any]):
+    """Generate SQL from natural language"""
+    try:
+        from semantic_kernel import Kernel
+        kernel = Kernel()
+        
+        sql_generator = SQLGenerator()
+        sql_query = await sql_generator.generate_sql_from_natural_language(
+            request.get("query", ""), kernel
+        )
+        
+        return {
+            "status": "success",
+            "generated_sql": sql_query,
+            "original_query": request.get("query", "")
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
