@@ -33,10 +33,9 @@ export default function Home() {
     }
 
     // Load capabilities
-    axios.get('http://localhost:8000/function-calling/capabilities')
+    axios.get('http://localhost:8000/health')
       .then(result => setCapabilities(result.data))
       .catch(err => console.error('Error loading capabilities:', err));
-
     // Load database schema (you could fetch this from your backend)
     const exampleSchema = [
       {
@@ -124,7 +123,7 @@ export default function Home() {
       localStorage.setItem('savedQueries', JSON.stringify([newQuery, ...savedQueries]));
     }
   };
-
+  
   const parseTradeData = useCallback((content) => {
     if (content.includes('entity_trade_header data') && content.includes('rows')) {
       try {
@@ -224,6 +223,36 @@ export default function Home() {
     return null;
   }, []);
 
+  const displayChart = (visualizationData) => {
+    if (!visualizationData || !visualizationData.data) {
+      alert('No chart data available');
+      return;
+    }
+
+    // Create a modal or popup to display the chart
+    const chartWindow = window.open('', '_blank');
+    chartWindow.document.write(`
+      <html>
+        <head>
+          <title>${visualizationData.title || 'Chart'}</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            img { max-width: 100%; height: auto; border: 1px solid #ddd; }
+          </style>
+        </head>
+        <body>
+          <h2>${visualizationData.title || 'Data Visualization'}</h2>
+          <img src="data:image/png;base64,${visualizationData.data}" 
+               alt="${visualizationData.title || 'Chart'}">
+          <p><strong>Chart Type:</strong> ${visualizationData.type}</p>
+          <button onclick="window.print()">Print Chart</button>
+          <button onclick="window.close()">Close</button>
+        </body>
+      </html>
+    `);
+    chartWindow.document.close();
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!inputText.trim() || isLoading) return;
@@ -251,9 +280,10 @@ export default function Home() {
 
     try {
       const result = await axios.post('http://localhost:8000/ask', {
-        prompt: inputText,
-        conversation_id: conversationId
-      });
+      prompt: inputText,
+      conversation_id: conversationId,
+      agentMode: "Balanced" // Add this if your backend expects it
+    });
       
       const response = result.data.response;
       const tradeData = parseTradeData(response);
@@ -266,7 +296,9 @@ export default function Home() {
         timestamp: new Date().toLocaleTimeString(),
         status: result.data.status,
         rawData: response,
-        tableData: tradeData || pnlData
+        tableData: tradeData || pnlData,
+        visualization: result.data.visualization,
+        hasChart: result.data.has_chart
       };
 
       setMessages(prev => [...prev, assistantMessage]);
@@ -452,27 +484,45 @@ export default function Home() {
     );
   };
 
-  const formatResponse = (content, tableData) => {
-    if (tableData) {
-      const { rows, columns, type } = tableData;
-      const displayColumns = selectedColumns.length > 0 ? selectedColumns : columns.slice(0, 8);
-      
-      return (
-        <div style={{ marginTop: '1rem' }}>
-          <div style={{ 
-            fontSize: '0.9rem', 
-            fontWeight: 'bold', 
+  const formatResponse = (content, tableData, hasChart, visualization) => {
+  if (tableData) {
+    const { rows, columns, type } = tableData;
+    const displayColumns = selectedColumns.length > 0 ? selectedColumns : columns.slice(0, 8);
+    
+    return (
+      <div style={{ marginTop: '1rem' }}>
+        <div style={{ 
+          fontSize: '0.9rem', 
+          fontWeight: 'bold', 
+          marginBottom: '0.5rem',
+          color: '#2c5282'
+        }}>
+          {type === 'trade' ? 'Trade' : 'PNL'} Data ({rows.length} rows, {columns.length} columns)
+        </div>
+        
+        <button 
+          onClick={() => setShowColumnSelector(!showColumnSelector)}
+          style={{
+            padding: '0.4rem 0.8rem',
+            backgroundColor: '#2196f3',
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '0.8rem',
             marginBottom: '0.5rem',
-            color: '#2c5282'
-          }}>
-            {type === 'trade' ? 'Trade' : 'PNL'} Data ({rows.length} rows, {columns.length} columns)
-          </div>
-          
+            marginRight: '0.5rem'
+          }}
+        >
+          {showColumnSelector ? 'Hide Column Selector' : 'Choose Columns...'}
+        </button>
+        
+        {hasChart && visualization && (
           <button 
-            onClick={() => setShowColumnSelector(!showColumnSelector)}
+            onClick={() => displayChart(visualization)}
             style={{
               padding: '0.4rem 0.8rem',
-              backgroundColor: '#2196f3',
+              backgroundColor: '#4caf50',
               color: 'white',
               border: 'none',
               borderRadius: '4px',
@@ -481,34 +531,77 @@ export default function Home() {
               marginBottom: '0.5rem'
             }}
           >
-            {showColumnSelector ? 'Hide Column Selector' : 'Choose Columns...'}
+            Show Chart
           </button>
-          
-          {showColumnSelector && (
-            <ColumnSelector 
-              columns={columns} 
-              selectedColumns={selectedColumns} 
-              setSelectedColumns={setSelectedColumns} 
-            />
-          )}
-          
-          <VerticalDataTable 
-            rows={rows} 
-            columns={displayColumns} 
-            type={type}
+        )}
+        
+        {showColumnSelector && (
+          <ColumnSelector 
+            columns={columns} 
+            selectedColumns={selectedColumns} 
+            setSelectedColumns={setSelectedColumns} 
           />
+        )}
+        
+        <VerticalDataTable 
+          rows={rows} 
+          columns={displayColumns} 
+          type={type}
+        />
+      </div>
+    );
+  }
+      
+  const sqlFormatted = formatSQL(content);
+    if (sqlFormatted) {
+      return (
+        <div>
+          {sqlFormatted}
+          {hasChart && visualization && (
+            <button 
+              onClick={() => displayChart(visualization)}
+              style={{
+                padding: '0.5rem 1rem',
+                backgroundColor: '#4caf50',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '0.9rem',
+                marginTop: '0.5rem'
+              }}
+            >
+              Show Chart
+            </button>
+          )}
         </div>
       );
     }
     
-    const sqlFormatted = formatSQL(content);
-    if (sqlFormatted) {
-      return sqlFormatted;
-    }
-    
-    return content.split('\n').map((line, index) => (
-      <div key={index} style={{ margin: '2px 0' }}>{line}</div>
-    ));
+    return (
+      <div>
+        {content.split('\n').map((line, index) => (
+          <div key={index} style={{ margin: '2px 0' }}>{line}</div>
+        ))}
+        {hasChart && visualization && (
+          <button 
+            onClick={() => displayChart(visualization)}
+            style={{
+              padding: '0.5rem 1rem',
+              backgroundColor: '#4caf50',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '0.9rem',
+              marginTop: '0.5rem'
+            }}
+          >
+            Show Chart
+          </button>
+        )}
+      </div>
+    );
   };
 
   const LeftPane = () => (
@@ -595,7 +688,7 @@ export default function Home() {
                     style={{
                       padding: '0.75rem',
                       backgroundColor: 'white',
-                      border: '1px solid #e0e0e0',
+                      border: '1px solid ',
                       borderRadius: '4px',
                       cursor: 'pointer',
                       transition: 'background-color 0.2s'
@@ -878,7 +971,7 @@ export default function Home() {
                   message.role === 'error' ? 'Error' : 'Assistant'} • {message.timestamp}
                 </div>
                 <div style={{ wordBreak: 'break-word' }}>
-                  {formatResponse(message.content, message.tableData)}
+                  {formatResponse(message.content, message.tableData, message.hasChart, message.visualization)}
                 </div>
                 {message.status && (
                   <div style={{ 
@@ -909,7 +1002,7 @@ export default function Home() {
                 <div style={{ 
                   width: '20px', 
                   height: '20px', 
-                  border: '2px solid #f3f3f3', 
+                  border: '2px solid #f3f3f3',
                   borderTop: '2px solid #0070f3', 
                   borderRadius: '50%', 
                   animation: 'spin 1s linear infinite',
@@ -922,73 +1015,58 @@ export default function Home() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input Area - FIXED POSITION */}
-        <form onSubmit={handleSubmit} style={{
-          padding: '1rem 2rem',
-          backgroundColor: 'white',
-          borderTop: '1px solid #e0e0e0',
-          flexShrink: 0
-        }}>
-          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+        {/* Input Area */}
+        <form
+          onSubmit={handleSubmit}
+          style={{
+            padding: '1rem 2rem',
+            backgroundColor: 'white',
+            borderTop: '1px solid #e0e0e0',
+            flexShrink: 0
+          }}
+        >
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end' }}>
             <input
               type="text"
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder={editingMessageId ? "Editing your prompt..." : "Type your message here..."}
-              disabled={isLoading}
+              placeholder="Type your message here..."
               style={{
                 flex: 1,
-                padding: '0.75rem',
+                padding: '0.75rem 1rem',
                 border: '1px solid #e0e0e0',
-                borderRadius: '4px',
+                borderRadius: '8px',
                 fontSize: '1rem',
-                backgroundColor: editingMessageId ? '#fff9e6' : 'white',
-                minWidth: '0' // Important for flexbox
+                outline: 'none',
+                transition: 'border-color 0.2s'
               }}
+              onFocus={(e) => e.target.style.borderColor = '#0070f3'}
+              onBlur={(e) => e.target.style.borderColor = '#e0e0e0'}
             />
-            <button 
-              type="submit" 
+            <button
+              type="submit"
               disabled={isLoading || !inputText.trim()}
               style={{
                 padding: '0.75rem 1.5rem',
                 backgroundColor: isLoading || !inputText.trim() ? '#ccc' : '#0070f3',
                 color: 'white',
                 border: 'none',
-                borderRadius: '4px',
+                borderRadius: '8px',
                 cursor: isLoading || !inputText.trim() ? 'not-allowed' : 'pointer',
                 fontSize: '1rem',
-                whiteSpace: 'nowrap',
-                flexShrink: 0
+                fontWeight: 'bold'
               }}
             >
-              {isLoading ? 'Sending...' : editingMessageId ? 'Resend' : 'Send'}
+              {isLoading ? 'Sending...' : 'Send'}
             </button>
-            {editingMessageId && (
-              <button 
-                type="button"
-                onClick={() => {
-                  setEditingMessageId(null);
-                  setInputText('');
-                }}
-                style={{
-                  padding: '0.75rem 1rem',
-                  backgroundColor: '#f5f5f5',
-                  color: '#757575',
-                  border: '1px solid #e0e0e0',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '1rem',
-                  whiteSpace: 'nowrap',
-                  flexShrink: 0
-                }}
-              >
-                Cancel
-              </button>
-            )}
           </div>
-          <div style={{ fontSize: '0.8rem', color: '#757575', marginTop: '0.5rem' }}>
-            Conversation ID: {conversationId}
-            {editingMessageId && ' • Editing previous prompt'}
+          <div style={{ 
+            fontSize: '0.8rem', 
+            color: '#666', 
+            marginTop: '0.5rem',
+            textAlign: 'center'
+          }}>
+            Press Enter to send • Shift+Enter for new line
           </div>
         </form>
       </div>
