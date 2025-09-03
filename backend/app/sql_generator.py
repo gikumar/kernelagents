@@ -13,7 +13,7 @@ class SQLGenerator:
     def __init__(self):
         self.schema_data = self._load_schema()
         self.schema_context = self._build_schema_context()
-        logger.info(f"SQL Generator initialized with {len(self.schema_data)} tables")
+        logger.info(f"💥SQL Generator initialized with {len(self.schema_data)} tables")
         
     def _load_schema(self) -> Dict:
         """Load schema from cache file"""
@@ -22,7 +22,7 @@ class SQLGenerator:
             if schema_file.exists():
                 with open(schema_file, "r") as f:
                     schema_data = json.load(f)
-                    logger.info(f"Loaded schema with {len(schema_data)} tables")
+                    logger.info(f"💥Loaded schema with {len(schema_data)} tables")
                     return schema_data
             else:
                 logger.warning("Schema cache file not found, attempting to load from schema_utils")
@@ -97,6 +97,9 @@ Important Notes:
     
     def _validate_sql_safety(self, sql_query: str) -> bool:
         """Validate SQL query for safety"""
+        if not sql_query:
+            return False
+            
         sql_lower = sql_query.lower().strip()
         
         # Block destructive operations
@@ -106,11 +109,15 @@ Important Notes:
             "merge", "replace", "commit", "rollback"
         ]
         
-        if any(keyword in sql_lower for keyword in destructive_keywords):
-            return False
+        # Check for destructive keywords
+        for keyword in destructive_keywords:
+            if re.search(rf'\b{keyword}\b', sql_lower):
+                logger.warning(f"💥SQL safety validation failed: found destructive keyword '{keyword}'")
+                return False
         
-        # Only allow SELECT queries
+        # Only allow SELECT queries (or WITH queries that are essentially SELECTs)
         if not (sql_lower.startswith('select') or sql_lower.startswith('with')):
+            logger.warning("💥SQL safety validation failed: query doesn't start with SELECT or WITH")
             return False
         
         # Check for potential injection patterns
@@ -121,6 +128,7 @@ Important Notes:
         
         for pattern in injection_patterns:
             if re.search(pattern, sql_lower, re.IGNORECASE):
+                logger.warning(f"💥SQL safety validation failed: found injection pattern '{pattern}'")
                 return False
         
         return True
@@ -163,7 +171,7 @@ Important Notes:
                 sql_query += f" LIMIT {limit}"
         
         except Exception as e:
-            logger.debug(f"Post-processing note: {str(e)}")
+            logger.debug(f"💥Post-processing note: {str(e)}")
         
         return sql_query
     
@@ -239,11 +247,11 @@ Important Notes:
             # Post-process for quality
             final_sql = self._post_process_sql(raw_sql, natural_language_query)
             
-            logger.info(f"Generated SQL: {final_sql}")
+            logger.info(f"💥Generated SQL: {final_sql}")
             return final_sql
             
         except Exception as e:
-            logger.error(f"Error generating SQL: {str(e)}")
+            logger.error(f"💥Error generating SQL: {str(e)}")
             raise
     
     def _get_chat_service_from_kernel(self, kernel):
@@ -254,10 +262,10 @@ Important Notes:
         try:
             chat_service = kernel.get_service("azure_gpt4o")
             if chat_service:
-                logger.info("Retrieved chat service by service_id 'azure_gpt4o'")
+                logger.info("💥Retrieved chat service by service_id 'azure_gpt4o'")
                 return chat_service
         except Exception as e:
-            logger.debug(f"Failed to get service by ID: {str(e)}")
+            logger.debug(f"💥Failed to get service by ID: {str(e)}")
         
         # Strategy 2: Get AzureChatCompletion service
         try:
@@ -265,20 +273,20 @@ Important Notes:
             services = kernel.get_services(type=AzureChatCompletion)
             if services:
                 chat_service = next(iter(services.values()))
-                logger.info("Retrieved AzureChatCompletion service")
+                logger.info("💥Retrieved AzureChatCompletion service")
                 return chat_service
         except Exception as e:
-            logger.debug(f"Failed to get AzureChatCompletion service: {str(e)}")
+            logger.debug(f"💥Failed to get AzureChatCompletion service: {str(e)}")
         
         # Strategy 3: Get any service with chat capabilities
         try:
             all_services = kernel.get_services()
             for service_id, service in all_services.items():
                 if hasattr(service, 'get_chat_message_contents'):
-                    logger.info(f"Retrieved chat service by capability check: {service_id}")
+                    logger.info(f"💥Retrieved chat service by capability check: {service_id}")
                     return service
         except Exception as e:
-            logger.debug(f"Failed to get service by capability: {str(e)}")
+            logger.debug(f"💥Failed to get service by capability: {str(e)}")
         
         return None
     
