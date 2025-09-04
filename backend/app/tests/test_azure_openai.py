@@ -8,9 +8,9 @@ from pathlib import Path
 env_path = Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-endpoint = "https://trade-llm-deployed-mode-resource.cognitiveservices.azure.com/"
-model_name = "gpt-4o"
-deployment = "trade-llm-deployed1-model-gpt-4o"
+endpoint = ""
+model_name = ""
+deployment = ""
 
 subscription_key = os.getenv("AZURE_OPENAI_API_KEY")
 api_version = "2024-12-01-preview"

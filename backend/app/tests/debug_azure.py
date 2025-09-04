@@ -1,4 +1,3 @@
-# backend/debug_azure.py
 import os
 import sys
 from pathlib import Path
