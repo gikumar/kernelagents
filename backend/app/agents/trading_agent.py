@@ -8,6 +8,7 @@ class TradingAgent(BaseAgent):
     def __init__(self, kernel):
         super().__init__(kernel, "trading_agent", "Handles trading data and analysis")
         self.azure_agent = None
+        self.conversation_store = {}   
     
     async def initialize(self):
         """Initialize trading agent with Azure AI Agent for automatic function calling"""
@@ -53,10 +54,37 @@ class TradingAgent(BaseAgent):
         )
     
     async def process_request(self, prompt: str, context: dict = None):
-        """Let Azure AI Agent handle automatic function calling"""
+        """Process request with conversation context"""
         if not self.azure_agent:
             raise ValueError("Azure AI Agent not initialized")
         
-        # Azure AI Agent will automatically decide which functions to call
-        response = await self.azure_agent.get_response([prompt])
+        # Extract conversation ID or generate one
+        conversation_id = context.get('conversation_id', 'default') if context else 'default'
+        
+        # Store conversation context for plugins to access
+        processing_context = {
+            'conversation_id': conversation_id,
+            'previous_messages': self._get_conversation_history(conversation_id)
+        }
+        
+        # Process with Azure AI Agent - PASS THE CONTEXT
+        response = await self.azure_agent.get_response(
+            [prompt], 
+            context=processing_context  # Add this line
+        )
+        
+        # Store this interaction in conversation history
+        self._store_conversation(conversation_id, prompt, str(response))
+        
         return str(response)
+    
+    def _get_conversation_history(self, conversation_id: str):
+        """Get conversation history for context"""
+        # This could be enhanced to use persistent storage
+        return []  # Placeholder
+    
+    def _store_conversation(self, conversation_id: str, prompt: str, response: str):
+        """Store conversation for future context"""
+        # This could be enhanced to use persistent storage
+        pass
+

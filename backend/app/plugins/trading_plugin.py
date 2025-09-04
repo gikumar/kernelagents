@@ -1,6 +1,5 @@
 # backend/app/plugins/trading_plugin.py
 from .base_plugin import BasePlugin
-#from semantic_kernel.plugin import kernel_function
 from semantic_kernel.functions import kernel_function
 
 from typing import Dict, List, Optional, Any, Tuple
@@ -12,7 +11,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-class TradingPlugin(BasePlugin):
+class TradingPlugin(BasePlugin):  # CORRECTED: BasePlugin instead of BaseAgent
     def __init__(self, kernel):
         super().__init__(kernel, "TradingPlugin")
         self.sql_generator = None
@@ -35,6 +34,8 @@ class TradingPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"💥 TradingPlugin.initialize() - Failed: {str(e)}")
             raise
+        finally:
+            logger.info("⭐ TradingPlugin.initialize() - Exit")
     
     async def _initialize_azure_openai(self):
         """Initialize Azure OpenAI connection"""
@@ -70,6 +71,8 @@ class TradingPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"💥 _initialize_azure_openai() - Failed: {str(e)}")
             raise
+        finally:
+            logger.info("⭐ _initialize_azure_openai() - Exit")
     
     async def _initialize_sql_generator(self):
         """Initialize SQL generator"""
@@ -82,18 +85,57 @@ class TradingPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"💥 _initialize_sql_generator() - Failed: {str(e)}")
             raise
+        finally:
+            logger.info("⭐ _initialize_sql_generator() - Exit")
 
     def _get_conversation_context(self, conversation_id: str) -> Dict:
         """Get or create conversation context"""
-        logger.info(f"⭐ _get_conversation_context() - Conversation ID: {conversation_id}")
-        if conversation_id not in self.conversations:
-            logger.info(f"⭐ Creating new conversation context for ID: {conversation_id}")
-            self.conversations[conversation_id] = {
-                "messages": [],
-                "created_at": time.time(),
-                "pending_clarification": None
-            }
-        return self.conversations[conversation_id]
+        logger.info(f"⭐ _get_conversation_context() - Entry: {conversation_id}")
+        try:
+            if conversation_id not in self.conversations:
+                logger.info(f"⭐ Decision: Creating new conversation context for ID: {conversation_id}")
+                self.conversations[conversation_id] = {
+                    "messages": [],
+                    "created_at": time.time(),
+                    "pending_clarification": None,
+                    "last_query": None,
+                    "query_history": []
+                }
+            return self.conversations[conversation_id]
+        finally:
+            logger.info("⭐ _get_conversation_context() - Exit")
+
+    def _update_conversation_context(self, conversation_id: str, query: str, response: str):
+        """Update conversation context with new interaction"""
+        logger.info(f"⭐ _update_conversation_context() - Entry: {conversation_id}")
+        try:
+            conversation_ctx = self._get_conversation_context(conversation_id)
+            
+            # Store the interaction
+            conversation_ctx["messages"].append({
+                "role": "user",
+                "content": query,
+                "timestamp": time.time()
+            })
+            
+            conversation_ctx["messages"].append({
+                "role": "assistant",
+                "content": response,
+                "timestamp": time.time()
+            })
+            
+            conversation_ctx["last_query"] = query
+            conversation_ctx["query_history"].append({
+                "query": query,
+                "timestamp": time.time(),
+                "response_preview": response[:100] + "..." if len(response) > 100 else response
+            })
+            
+            logger.info(f"⭐ Conversation context updated with new interaction")
+        except Exception as e:
+            logger.error(f"💥 Error updating conversation context: {str(e)}")
+        finally:
+            logger.info("⭐ _update_conversation_context() - Exit")
 
     def _get_databricks_connection(self):
         """Get Databricks connection with error handling"""
@@ -122,27 +164,43 @@ class TradingPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"💥 Failed to connect to Databricks: {str(e)}")
             return None
+        finally:
+            logger.info("⭐ _get_databricks_connection() - Exit")
 
 
     @kernel_function(
-        name="query_trade_data",
-        description="Query trade data from database using natural language. Use this when user asks about trades, deals, transactions, or wants to see trade information"
-    )
-    async def query_trade_data(self, natural_language_query: str = "") -> str:
+    name="query_trade_data",
+    description="Query trade data from database using natural language. Use this when user asks about trades, deals, transactions, or wants to see trade information"
+)
+    async def query_trade_data(self, natural_language_query: str = "", context: dict = None) -> str:
         """Query trade data using natural language to SQL conversion"""
+        # Ensure context has a default value
+        context = context or {}
         logger.info(f"⭐ query_trade_data() - Entry: '{natural_language_query[:50]}...'")
+
+        # Extract conversation ID from context
+        conversation_id = context.get('conversation_id', 'default') if context else 'default'
+        conversation_ctx = self._get_conversation_context(conversation_id)
         
         try:
             logger.info(f"⭐ Processing natural language query: {natural_language_query}")
+            logger.info(f"⭐ Conversation ID: {conversation_id}, Context messages: {len(conversation_ctx['messages'])}")
+            
+            # Add conversation context to the query if available
+            enhanced_query = self._enhance_query_with_context(natural_language_query, conversation_ctx)
+            if enhanced_query != natural_language_query:
+                logger.info(f"⭐ Enhanced query with conversation context")
             
             if not self.sql_generator:
                 logger.error("⭐ SQL Generator not available - cost saving mode")
-                return "SQL query generation is currently disabled to save costs. Please try again later or use direct SQL queries with the execute_custom_query function."
+                response = "SQL query generation is currently disabled to save costs. Please try again later or use direct SQL queries with the execute_custom_query function."
+                self._update_conversation_context(conversation_id, natural_language_query, response)
+                return response
             
             # Generate SQL from natural language
             logger.info("⭐ Generating SQL from natural language")
             sql_query = await self.sql_generator.generate_sql_from_natural_language(
-                natural_language_query, self.kernel
+                enhanced_query, self.kernel
             )
             
             logger.info(f"⭐ Generated SQL: {sql_query}")
@@ -150,7 +208,9 @@ class TradingPlugin(BasePlugin):
             # If SQL generation failed, provide a helpful response
             if "error" in sql_query.lower() or "not available" in sql_query.lower():
                 logger.warning(f"⭐ SQL generation failed: {sql_query}")
-                return f"I couldn't generate a valid SQL query for your request. Please try rephrasing your question. Error: {sql_query}"
+                response = f"I couldn't generate a valid SQL query for your request. Please try rephrasing your question. Error: {sql_query}"
+                self._update_conversation_context(conversation_id, natural_language_query, response)
+                return response
             
             # Execute the query and get results
             logger.info("⭐ Executing SQL query")
@@ -167,18 +227,38 @@ class TradingPlugin(BasePlugin):
                     "visualization": chart_data,
                     "has_chart": True
                 }
-                return json.dumps(response_data)
+                response = json.dumps(response_data)
             else:
                 logger.info("⭐ No visualization needed, returning text response only")
-                return result_text
+                response = result_text
+            
+            # Update conversation context with this interaction
+            self._update_conversation_context(conversation_id, natural_language_query, response)
+                
+            return response
                 
         except Exception as e:
             error_msg = f"💥 Error processing query: {str(e)}"
             logger.error(error_msg)
-            return f"I encountered an error while processing your request. Please try again or rephrase your question. Error: {str(e)}"
+            response = f"I encountered an error while processing your request. Please try again or rephrase your question. Error: {str(e)}"
+            self._update_conversation_context(conversation_id, natural_language_query, response)
+            return response
         finally:
             logger.info("⭐ query_trade_data() - Exit")
 
+    def _enhance_query_with_context(self, query: str, conversation_ctx: Dict) -> str:
+        """Enhance the query with conversation context for better follow-ups"""
+        if not conversation_ctx.get("messages"):
+            return query
+        
+        # Build context from recent conversation
+        context_parts = []
+        for msg in conversation_ctx["messages"][-6:]:  # Last 3 exchanges
+            role = "User" if msg["role"] == "user" else "Assistant"
+            context_parts.append(f"{role}: {msg['content']}")
+        
+        context_str = "\n".join(context_parts)
+        return f"Previous conversation:\n{context_str}\n\nCurrent question: {query}"
 
     async def _execute_sql_query(self, sql_query: str, original_query: str = "") -> Tuple[str, Optional[List[Dict]]]:
         """Execute SQL query and return both formatted results and raw data"""
@@ -230,7 +310,6 @@ class TradingPlugin(BasePlugin):
             connection.close()
             logger.info("⭐ Database connection closed")
             logger.info("⭐ _execute_sql_query() - Exit")
-
 
     def _format_query_results(self, data: list, columns: list, sql_query: str, original_query: str) -> str:
         """Format query results intelligently"""
@@ -327,21 +406,26 @@ class TradingPlugin(BasePlugin):
         logger.info("⭐ _get_key_columns() - Exit")
         return key_columns
 
-
     @kernel_function(
         name="explain_concept",
         description="Explain trading concepts, definitions, or general information"
     )
-    async def explain_concept(self, concept: str) -> str:
+    async def explain_concept(self, concept: str, context: dict = None) -> str:
         """Explain trading concepts using LLM"""
         logger.info(f"⭐ explain_concept() - Entry: '{concept}'")
         
         try:
+            # Extract conversation ID from context
+            conversation_id = context.get('conversation_id', 'default') if context else 'default'
+            conversation_ctx = self._get_conversation_context(conversation_id)
+            
             logger.info(f"⭐ Explaining concept: {concept}")
             
             if not self.chat_service:
                 logger.error("⭐ LLM service not available")
-                return "LLM service not available. Please check Azure OpenAI configuration."
+                response = "LLM service not available. Please check Azure OpenAI configuration."
+                self._update_conversation_context(conversation_id, concept, response)
+                return response
             
             explanation_prompt = f"""
             Please provide a clear, comprehensive explanation of '{concept}' in the context of trading and finance.
@@ -380,43 +464,57 @@ class TradingPlugin(BasePlugin):
             
             if result and len(result) > 0:
                 logger.info("⭐ Concept explanation generated successfully")
-                return f"**Explanation of '{concept}':**\n\n{result[0].content}"
+                response = f"**Explanation of '{concept}':**\n\n{result[0].content}"
+            else:
+                logger.warning("⭐ Could not generate explanation")
+                response = f"Could not generate explanation for '{concept}'."
             
-            logger.warning("⭐ Could not generate explanation")
-            return f"Could not generate explanation for '{concept}'."
+            # Update conversation context
+            self._update_conversation_context(conversation_id, concept, response)
+            return response
             
         except Exception as e:
             logger.error(f"💥 Error explaining concept: {str(e)}")
-            return f"I apologize, but I encountered an error while explaining '{concept}': {str(e)}"
+            response = f"I apologize, but I encountered an error while explaining '{concept}': {str(e)}"
+            self._update_conversation_context(conversation_id, concept, response)
+            return response
         finally:
             logger.info("⭐ explain_concept() - Exit")
-
 
     @kernel_function(
         name="execute_custom_query", 
         description="Execute a specific SQL query on the database"
     )
-    async def execute_custom_query(self, sql_query: str) -> str:
+    async def execute_custom_query(self, sql_query: str, context: dict = None) -> str:
         """Execute custom SQL query"""
         logger.info(f"⭐ execute_custom_query() - Entry: {sql_query[:100]}...")
         
         try:
+            # Extract conversation ID from context
+            conversation_id = context.get('conversation_id', 'default') if context else 'default'
+            conversation_ctx = self._get_conversation_context(conversation_id)
+            
             logger.info(f"⭐ Executing custom SQL: {sql_query[:100]}...")
             
             if not self._validate_sql_query(sql_query):
                 logger.warning("⭐ SQL query validation failed")
-                return "For safety, only SELECT queries are allowed."
+                response = "For safety, only SELECT queries are allowed."
+                self._update_conversation_context(conversation_id, sql_query, response)
+                return response
             
             result_text, _ = await self._execute_sql_query(sql_query, "Custom SQL Query")
+            
+            # Update conversation context
+            self._update_conversation_context(conversation_id, sql_query, result_text)
             return result_text
             
         except Exception as e:
             error_msg = f"💥 Error executing custom query: {str(e)}"
             logger.error(error_msg)
+            self._update_conversation_context(conversation_id, sql_query, error_msg)
             return error_msg
         finally:
             logger.info("⭐ execute_custom_query() - Exit")
-
 
     def _validate_sql_query(self, sql_query: str) -> bool:
         """Validate SQL query for safety"""
@@ -442,7 +540,6 @@ class TradingPlugin(BasePlugin):
         logger.info("⭐ SQL validation passed")
         logger.info("⭐ _validate_sql_query() - Exit")
         return True
-
 
     async def _generate_visualization_if_needed(self, query: str, raw_data: List[Dict]) -> Optional[Dict]:
         """Generate visualization if the query suggests charting is needed"""
@@ -492,7 +589,6 @@ class TradingPlugin(BasePlugin):
         finally:
             logger.info("⭐ _generate_visualization_if_needed() - Exit")
 
-
     async def cleanup(self):
         """Cleanup resources"""
         logger.info("⭐ TradingPlugin.cleanup() - Entry")
@@ -503,7 +599,6 @@ class TradingPlugin(BasePlugin):
             logger.error(f"💥 Error during cleanup: {str(e)}")
         finally:
             logger.info("⭐ TradingPlugin.cleanup() - Exit")
-
 
 # Available functions for capabilities endpoint
 AVAILABLE_FUNCTIONS = [
