@@ -37,6 +37,7 @@ class TradingPlugin(BasePlugin):  # CORRECTED: BasePlugin instead of BaseAgent
         finally:
             logger.info("⭐ TradingPlugin.initialize() - Exit")
     
+    
     async def _initialize_azure_openai(self):
         """Initialize Azure OpenAI connection"""
         logger.info("⭐ _initialize_azure_openai() - Entry")
@@ -172,14 +173,33 @@ class TradingPlugin(BasePlugin):  # CORRECTED: BasePlugin instead of BaseAgent
     name="query_trade_data",
     description="Query trade data from database using natural language. Use this when user asks about trades, deals, transactions, or wants to see trade information"
 )
-    async def query_trade_data(self, natural_language_query: str = "", context: dict = None) -> str:
+    async def query_trade_data(self, natural_language_query: str = "") -> str:
         """Query trade data using natural language to SQL conversion"""
-        # Ensure context has a default value
-        context = context or {}
         logger.info(f"⭐ query_trade_data() - Entry: '{natural_language_query[:50]}...'")
-
-        # Extract conversation ID from context
-        conversation_id = context.get('conversation_id', 'default') if context else 'default'
+        
+        # Get context from the trading agent
+        try:
+            from app.agents.trading_agent import TradingAgent
+            trading_agent = None
+            
+            # Find the trading agent instance (this is a bit hacky but works)
+            for service in self.kernel.get_services():
+                if isinstance(service, TradingAgent):
+                    trading_agent = service
+                    break
+            
+            if trading_agent and hasattr(trading_agent, 'current_context'):
+                context = trading_agent.current_context
+                conversation_id = context.get('conversation_id', 'default')
+            else:
+                conversation_id = 'default'
+                context = {}
+                
+        except Exception as e:
+            logger.warning(f"⭐ Could not get context from trading agent: {str(e)}")
+            conversation_id = 'default'
+            context = {}
+        
         conversation_ctx = self._get_conversation_context(conversation_id)
         
         try:

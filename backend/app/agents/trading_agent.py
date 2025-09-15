@@ -40,8 +40,8 @@ class TradingAgent(BaseAgent):
         agent_def = await project_client.agents.create_agent(
             model=config.AZURE_OPENAI_DEPLOYMENT,  # Use your model name
             name="trading_assistant",
-            instructions="""You are an AI assistant for trading and financial data analysis.
-            You can help users query trade data, explain trading concepts, 
+            instructions="""You are an AI assistant for oil and gas trading.
+            You can help users query trade data, explain trading concepts in context of oil and gas commodity trading. 
             execute custom SQL queries, and provide general trading assistance.
             Use the available plugin functions automatically when appropriate."""
         )
@@ -50,7 +50,7 @@ class TradingAgent(BaseAgent):
         self.azure_agent = AzureAIAgent(
             client=project_client,
             definition=agent_def,
-            plugins=[self.trading_plugin, self.email_plugin]  # Let Azure AI handle routing
+            plugins=[self.trading_plugin, self.email_plugin]
         )
     
     async def process_request(self, prompt: str, context: dict = None):
@@ -61,17 +61,15 @@ class TradingAgent(BaseAgent):
         # Extract conversation ID or generate one
         conversation_id = context.get('conversation_id', 'default') if context else 'default'
         
-        # Store conversation context for plugins to access
-        processing_context = {
+        # Store conversation context in the agent instance for plugins to access
+        self.current_context = {
             'conversation_id': conversation_id,
-            'previous_messages': self._get_conversation_history(conversation_id)
+            'previous_messages': self._get_conversation_history(conversation_id),
+            'agent_mode': context.get('agent_mode', 'Balanced') if context else 'Balanced'
         }
         
-        # Process with Azure AI Agent - PASS THE CONTEXT
-        response = await self.azure_agent.get_response(
-            [prompt], 
-            context=processing_context  # Add this line
-        )
+        # Process with Azure AI Agent - DON'T pass context here
+        response = await self.azure_agent.get_response([prompt])
         
         # Store this interaction in conversation history
         self._store_conversation(conversation_id, prompt, str(response))
